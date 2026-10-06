@@ -314,16 +314,10 @@
   function setupMainNavigation() {
     const nav = document.querySelector('.dashboard-nav');
     if (!nav) return;
-    // 原日报把代表点统计放在官方图之前；三栏导航下归入产区站点栏目。
-    const stationSection = document.getElementById('station-section');
+    // 旧代表点区域统计采用另一套口径；新产区栏目只读取 ERA5-Land 导出。
     const regionGrid = document.querySelector('.region-grid');
-    const stationPicker = stationSection && stationSection.querySelector('.station-picker');
-    if (regionGrid && stationPicker && !stationSection.contains(regionGrid)) {
-      const intro = regionGrid.previousElementSibling;
-      if (intro && intro.tagName === 'P') stationSection.insertBefore(intro, stationPicker);
-      stationSection.insertBefore(regionGrid, stationPicker);
-    }
-    const views = new Set(['enso', 'official', 'stations']);
+    if (regionGrid) regionGrid.remove();
+    const views = new Set(['enso', 'official', 'climate', 'risk']);
     const sections = [...document.querySelectorAll('main.wrap > section')];
     const buttons = [...nav.querySelectorAll('button[data-view]')];
     const show = (view, updateHash = true) => {

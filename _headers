@@ -1,0 +1,10 @@
+/
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+/assets/*
+  Cache-Control: public, max-age=0, must-revalidate
+/data/*
+  Cache-Control: public, max-age=0, must-revalidate
+/site-publication.json
+  Cache-Control: no-cache
