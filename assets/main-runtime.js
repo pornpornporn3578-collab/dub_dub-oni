@@ -3,6 +3,9 @@
   const plotOptions = {displaylogo: false, responsive: true, scrollZoom: false,
     modeBarButtonsToRemove: ['lasso2d', 'select2d']};
   let figures = window.reportMainFigures || [];
+  let hasSnapshot = false;
+  const weeklyHistory = window.weeklyNinoHistory;
+  let weeklyOverride = weeklyHistory?.schema_version === 1 ? weeklyHistory.fallback_figure : null;
   let plotQueue = Promise.resolve();
   const observer = 'IntersectionObserver' in window
     ? new IntersectionObserver(entries => {
@@ -16,8 +19,10 @@
   function render(node) {
     if (node.dataset.rendered === '1') return;
     node.dataset.rendered = '1';
-    const figure = figures[Number(node.dataset.mainIndex)];
+    const index = Number(node.dataset.mainIndex);
+    const figure = index === 2 && weeklyOverride ? weeklyOverride : figures[index];
     if (!figure) return;
+    if (node.style && figure.layout?.height) node.style.height = `${figure.layout.height}px`;
     node.replaceChildren();
     plotQueue = plotQueue.catch(() => {}).then(() => new Promise(resolve => setTimeout(resolve, 0)))
       .then(() => Plotly.newPlot(node, figure.data, figure.layout, plotOptions))
@@ -72,6 +77,12 @@
       throw new Error('ENSO snapshot format is not supported');
     }
     figures = snapshot.figures;
+    // A pre-rendered history never replaces data from a different source revision.
+    const matchingWeeklySource = weeklyHistory?.schema_version === 1 &&
+      ['weekly_relative_sst', 'weekly_sst'].every(key =>
+        weeklyHistory.source_sha256?.[key] && weeklyHistory.source_sha256[key] === snapshot.sources?.[key]?.sha256);
+    weeklyOverride = figures[2]?.layout?.meta?.full_official_history ? null :
+      matchingWeeklySource ? weeklyHistory.snapshot_figure : null;
     const cached = Object.entries(snapshot.sources || {}).filter(([, item]) => item.status === 'cache');
     const hero = document.querySelector('.hero[data-site-view="enso"]');
     if (hero) {
@@ -101,6 +112,9 @@
     updateMethodology();
     const meta = document.querySelector('header .meta');
     if (meta) meta.textContent = `ENSO 来源已核对 ${dateLabel(snapshot.generated_at)} · 官方图集显示各来源有效期 · 产区气候与割胶评估显示本地导出日期`;
+    hasSnapshot = true;
+    if (hero) hero.setAttribute('aria-busy', 'false');
+    if (document.documentElement) document.documentElement.dataset.ensoState = 'ready';
     for (const node of document.querySelectorAll('[data-main-index]')) {
       const alreadyRendered = node.dataset.rendered === '1';
       node.dataset.rendered = '0';
@@ -114,19 +128,35 @@
       if (!response.ok) throw new Error(`ENSO HTTP ${response.status}`);
       updateEnso(await response.json());
     } catch (error) {
-      const notice = document.querySelector('.hero .snapshot-alert');
-      if (notice && !notice.id) notice.textContent = 'ENSO 新快照暂未载入，下面保留2026-09-27旧快照，不是当前日新观测。运行“每日更新气候数据.cmd”后刷新页面重试。';
+      if (!hasSnapshot) {
+        if (document.documentElement) document.documentElement.dataset.ensoState = 'error';
+        const notice = document.querySelector('#enso-loading-status');
+        if (notice) notice.textContent = 'ENSO 数据读取未完成。没有展示旧版快照或旧数值，请点击下方按钮重试。';
+        const retry = document.querySelector('#enso-load-retry');
+        if (retry) retry.hidden = false;
+      } else {
+        const notice = document.querySelector('.hero .snapshot-alert');
+        if (notice) notice.textContent = '本次重新读取未完成；保留下方已成功载入的数据，来源核对时间仍以原标注为准。';
+      }
       console.warn('ENSO snapshot fallback:', error.message);
+    }
+    if (hasSnapshot) {
+      for (const node of document.querySelectorAll('[data-main-index]')) {
+        if (observer) observer.observe(node);
+        else render(node);
+      }
     }
   }
   window.addEventListener('official:updated', event => {
     if (!event.detail?.key || event.detail.key === 'enso') loadSnapshot();
   });
-  updateMethodology();
-  loadSnapshot().finally(() => {
-    for (const node of document.querySelectorAll('[data-main-index]')) {
-      if (observer) observer.observe(node);
-      else render(node);
-    }
+  document.querySelector('#enso-load-retry')?.addEventListener('click', () => {
+    const retry = document.querySelector('#enso-load-retry');
+    if (retry) retry.hidden = true;
+    const notice = document.querySelector('#enso-loading-status');
+    if (notice) notice.textContent = '正在重新读取本次发布的 ENSO 数据…';
+    loadSnapshot();
   });
+  updateMethodology();
+  loadSnapshot();
 })();

@@ -1,10 +1,12 @@
 /
-  Cache-Control: no-cache
+  Cache-Control: no-store
 /index.html
-  Cache-Control: no-cache
+  Cache-Control: no-store
 /assets/*
   Cache-Control: public, max-age=0, must-revalidate
 /data/*
   Cache-Control: public, max-age=0, must-revalidate
+/data/enso.json.gz
+  Cache-Control: no-store
 /site-publication.json
-  Cache-Control: no-cache
+  Cache-Control: no-store
