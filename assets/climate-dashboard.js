@@ -3,6 +3,9 @@
 
   const $ = id => document.getElementById(id);
   const base = new URL('data/', document.baseURI);
+  let climateBase = base;
+  let crop = 'rubber';
+  let catalogToken = 0;
   const metricNames = {
     tmean: '平均气温', tmax: '最高气温', precip: '降水量', rain_hours: '降水小时数',
     soil1: '浅层土壤湿度（0–7 cm）', soil2: '土壤湿度（7–28 cm）',
@@ -28,7 +31,7 @@
   const mutedPalette = ['#b0b7bf', '#d39e40', '#6b91c6', '#5ca988', '#c4775f', '#aaa2bb', '#7fa5c1', '#b99072'];
   const els = {
     section: $('climate-section'), status: $('climate-load-status'), generated: $('climate-generated'),
-    country: $('climate-country'), scale: $('climate-scale'), macro: $('climate-macroregion'), search: $('climate-region-search'), region: $('climate-region'),
+    crop: $('climate-crop'), country: $('climate-country'), scale: $('climate-scale'), macro: $('climate-macroregion'), search: $('climate-region-search'), region: $('climate-region'),
     metric: $('climate-metric'), mode: $('climate-aggregation'), regionHead: $('climate-region-head'),
     regionTitle: $('climate-region-title'), regionSubtitle: $('climate-region-subtitle'),
     regionType: $('climate-region-type'), quality: $('climate-quality-badge'),
@@ -81,7 +84,7 @@
     els.macro.disabled = els.scale.value === 'country' || !groups.length;
   }
   function regionReference(region) {
-    const record = (tapping?.regions || []).find(item => item.id === region.id);
+    const record = crop === 'rubber' ? (tapping?.regions || []).find(item => item.id === region.id) : null;
     return region.reference || record?.reference || {};
   }
   function productionTons(region) {
@@ -230,7 +233,9 @@
       equal_sampled_regions_no_complete_harvest_area: '可割面积不完整，已采样地区等权',
       model_or_polygon_selected_cell_share: '模型或多边形选中格点份额',
       user_workbook_F_harvestable_area_ha_unverified: '工作簿 F 列可割面积（未核验）',
-      within_region_weight_from_source_links: '来源关联的产区内格点权重'
+      within_region_weight_from_source_links: '来源关联的产区内格点权重',
+      selected_model_cell_oil_palm_area_share: '模型选中格点油棕面积份额',
+      mapped_oil_palm_area: '已采样产区的模型油棕面积（非产量权重）'
     })[value] || (value ? '其他暂定权重口径' : '未注明');
   }
   function qualityText(value) {
@@ -476,13 +481,13 @@
     parts.push(temp && temp.median !== null
       ? `近 7 日平均气温 ${fmt(temp.latest.value, 'tmean')}，比历史同期中位数${temp.latest.value >= temp.median ? '高' : '低'} ${Math.abs(temp.latest.value - temp.median).toFixed(1)} °C。`
       : '近 7 日气温历史比较所需的连续日或同期样本不足。');
-    const riskRecord = matchingRiskRecord();
+    const riskRecord = crop === 'rubber' ? matchingRiskRecord() : null;
     const riskDay = latestDay(riskRecord);
     if (riskDay) {
       parts.push(`历史天气不利条件等级：${riskLevel(riskDay.risk_level)[0]}（${fmtDate(riskDay.date)}，不利条件占比 ${pct(riskDay.adverse_share)}）；并非实际停割，详见“割胶天气评估”栏目。`);
       if (selectedRegion.weight_basis && riskDay.weight_basis && selectedRegion.weight_basis !== riskDay.weight_basis)
         parts.push('本页气候曲线与割胶不利条件使用不同的样本权重口径，数值不能直接相减或视作同一国别覆盖率。');
-    } else {
+    } else if (crop === 'rubber') {
       parts.push('割胶不利天气等级尚未导出或此范围没有可匹配的结果。');
     }
     parts.push(cov.missing_days > 0
@@ -626,13 +631,13 @@
   }
   async function loadSeries(region) {
     if (!region.series_file) throw new Error('尚未导出此地区的气候序列');
-    const key = region.series_file;
+    const key = new URL(region.series_file.replace(/^\/+/, ''), climateBase).href;
     if (seriesCache.has(key)) {
       const value = seriesCache.get(key); seriesCache.delete(key); seriesCache.set(key, value); return value;
     }
     if (seriesInflight.has(key)) return seriesInflight.get(key);
     const request = (async () => {
-      const response = await fetch(new URL(key.replace(/^\/+/, ''), base), {cache: 'no-store'});
+      const response = await fetch(key, {cache: 'no-store'});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const series = await response.json();
       if (series.schema_version !== 1 || !Array.isArray(series.daily) || !Array.isArray(series.columns))
@@ -657,12 +662,13 @@
     const year = region.production_reference_year || regionReference(region).year;
     const countryTotal = countryRegions(region.country_iso3).reduce((sum, item) => sum + (productionTons(item) ?? 0), 0);
     const groupTotal = scopeRegions.reduce((sum, item) => sum + (productionTons(item) ?? 0), 0);
-    const countryShare = region.production_share_country ?? (countryTotal > 0 ? tons / countryTotal : null);
+    const countryShare = region.production_share_country ?? (crop === 'rubber' && countryTotal > 0 ? tons / countryTotal : null);
     const groupShare = region.production_share_group ?? (groupTotal > 0 ? tons / groupTotal : null);
     const countryBasis = region.production_share_basis === 'Hainan_reference_total' ||
       regionReference(region).production_share_basis === 'Hainan_reference_total'
       ? '海南参考产量占比' : '国别参考产量占比';
-    return [`${year || '参考年'}产量 ${(tons / 10000).toFixed(2)} 万吨`,
+    const basis = crop === 'palm' ? (region.production_basis === 'FFB' ? '鲜果串' : region.production_basis === 'CPO' ? '毛棕榈油（加工地）' : '') : '';
+    return [`${year || '参考年'}${basis}产量 ${(tons / 10000).toFixed(2)} 万吨`,
       countryShare !== null ? `${countryBasis} ${(countryShare * 100).toFixed(2)}%` : '',
       els.macro.value && groupShare !== null ? `本区域占比 ${(groupShare * 100).toFixed(2)}%` : ''].filter(Boolean).join(' · ');
   }
@@ -721,7 +727,7 @@
     const productionCount = regions.filter(region => productionTons(region) !== null).length;
     els.galleryTitle.textContent = `${macro ? displayName(macro) : countryNames.get(els.country.value)} · ${metricNames[metric]} · ${measureLabel(metric, mode)}`;
     els.gallerySummary.textContent = `共 ${regions.length} 个候选产区，${available} 个已导出序列${pending ? `，${pending} 个已选点、历史下载待完成` : ''}。${productionCount
-      ? ` ${productionCount} 个有工作簿参考产量，按产量占比从高到低排列；其余列在后方。`
+      ? ` ${productionCount} 个有${crop === 'palm' ? '官方' : '工作簿'}参考产量，按产量占比从高到低排列；其余列在后方。`
       : ' 尚无可比较的完整参考产量，暂按产区名称排列。'}`;
     renderSeasonLegend(); els.gallerySection.hidden = false;
     galleryObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
@@ -822,10 +828,13 @@
     }
   }
   async function initClimate() {
+    const token = ++catalogToken;
+    const requestedBase = climateBase;
     try {
-      const response = await fetch(new URL('index.json', base), {cache: 'no-store'});
+      const response = await fetch(new URL('index.json', requestedBase), {cache: 'no-store'});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      if (token !== catalogToken) return;
       if (data.schema_version !== 1 || !Array.isArray(data.regions) || !Array.isArray(data.countries))
         throw new Error('数据目录格式不符合 schema v1');
       catalog = data;
@@ -834,13 +843,29 @@
       $('climate-baseline-years').textContent = (data.source?.reference_years || [2006, 2025]).join('–');
       const dates = data.regions.map(region => region.coverage?.last_complete_date).filter(Boolean).sort();
       $('climate-latest-date').textContent = dates.length ? dates[dates.length - 1] : '—';
-      els.generated.textContent = `目录生成：${fmtTimestamp(data.generated_utc)} · 数据源 ${data.source?.dataset || 'ERA5-Land'}`;
+      els.generated.textContent = `目录生成：${fmtTimestamp(data.generated_utc)} · 数据源 ${data.source?.dataset || 'ERA5-Land'}${crop === 'palm' ? ' · 油棕2021模型选点，覆盖三国已选产区' : ''}`;
       populateCountries();
     } catch (error) {
+      if (token !== catalogToken) return;
       els.generated.textContent = '本地数据目录尚未就绪';
-      setStatus(`无法读取 data/index.json：${error.message}。请使用本地预览服务打开，等待气候数据导出后刷新。`, true);
+      setStatus(`无法读取 ${crop === 'palm' ? '棕榈' : '橡胶'}数据目录：${error.message}。请使用本地预览服务打开，等待气候数据导出后刷新。`, true);
     }
   }
+  els.crop.addEventListener('change', () => {
+    crop = els.crop.value === 'palm' ? 'palm' : 'rubber';
+    // The supplementary forecast archive uses rubber nodes and weights.
+    // Keep its existing renderer intact; it is outside the palm history scope.
+    const rubberForecast = els.section.querySelector('.forecast-panel');
+    if (rubberForecast) rubberForecast.style.display = crop === 'palm' ? 'none' : '';
+    climateBase = crop === 'palm' ? new URL('palm/', base) : base;
+    ++selectedToken; ++chartVersion; ++timeGalleryVersion;
+    catalog = null; selectedRegion = null; selectedSeries = null;
+    clearGallery(); clearSelection('正在读取所选品种的数据目录…');
+    els.search.value = '';
+    for (const field of [els.country, els.scale, els.macro, els.region, els.search]) field.disabled = true;
+    for (const id of ['climate-region-count', 'climate-series-count', 'climate-latest-date']) $(id).textContent = '—';
+    void initClimate();
+  });
   els.country.addEventListener('change', () => { els.search.value = ''; populateMacroRegions(); populateRegions(); });
   els.scale.addEventListener('change', () => { els.search.value = ''; populateModes(); populateMacroRegions(els.macro.value); populateRegions(); });
   els.macro.addEventListener('change', () => { els.search.value = ''; populateRegions(); });
