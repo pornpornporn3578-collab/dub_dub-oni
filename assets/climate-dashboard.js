@@ -7,13 +7,13 @@
   let crop = 'rubber';
   let catalogToken = 0;
   const metricNames = {
-    tmean: '平均气温', tmax: '最高气温', precip: '降水量', rain_hours: '降水小时数',
+    tmean: '平均气温', tmax: '最高气温', tmin: '最低气温', precip: '降水量', rain_hours: '降水小时数',
     soil1: '浅层土壤湿度（0–7 cm）', soil2: '土壤湿度（7–28 cm）',
     soil3: '土壤湿度（28–100 cm）', soil4: '深层土壤湿度（100–289 cm）',
     vpd: '水汽压亏缺 VPD', vpd_high_hours: '高 VPD 小时数（>1.8 kPa）'
   };
   const metricUnits = {
-    tmean: '°C', tmax: '°C', precip: 'mm', rain_hours: '小时',
+    tmean: '°C', tmax: '°C', tmin: '°C', precip: 'mm', rain_hours: '小时',
     soil1: 'm³/m³', soil2: 'm³/m³', soil3: 'm³/m³', soil4: 'm³/m³', vpd: 'kPa', vpd_high_hours: '小时'
   };
   const modeNames = {
@@ -24,7 +24,7 @@
   const metricModes = {
     precip: [['weekly', '完整自然周总量'], ['rolling15', '15 日滚动累计'], ['yearly', '全年累计']],
     rain_hours: [['weekly', '完整自然周总量'], ['rolling15', '15 日滚动累计'], ['yearly', '全年累计']],
-    tmean: [['rolling7', '7 日滚动平均']], tmax: [['daily', '日度']],
+    tmean: [['rolling7', '7 日滚动平均']], tmax: [['daily', '日度']], tmin: [['daily', '日度']],
     soil1: [['daily', '日度']], soil2: [['daily', '日度']], soil3: [['daily', '日度']], soil4: [['daily', '日度']],
     vpd_high_hours: [['rolling15', '15 日滚动累计'], ['yearly', '全年累计']]
   };
@@ -507,12 +507,22 @@
     return mode === 'yearly' ? '全年累计' : mode === 'daily' ? '日度' :
       mode === 'weekly' ? '完整自然周总量' : `${modeNames[mode]}${cumulativeMetrics.has(metric) ? '累计' : '平均'}`;
   }
+  function seasonYearStyles(metric, current = currentYear()) {
+    const recent = metric === 'tmin';
+    return [
+      {year: current, label: `${current} · 今年`, color: '#FF0000', colorName: '红',
+        symbol: 'square', fill: recent ? '#FEE2E2' : '#FFF2CC', border: recent ? '#FF0000' : '#ED7D31'},
+      {year: current - 1, label: `${current - 1} · 去年`, color: '#000000', colorName: '黑', fill: '#E7E6E6', border: '#000000'},
+      {year: recent ? current - 2 : 2016, color: '#0000FF', colorName: '蓝', fill: '#DAE3F3', border: '#0000FF'},
+      {year: recent ? current - 3 : 2015, color: '#8B00FF', colorName: '紫', fill: '#E6D7FF', border: '#9900FF'},
+      ...(recent ? [{year: current - 4, color: '#008000', colorName: '绿', fill: '#DCFCE7', border: '#008000'}] : [])
+    ];
+  }
   function figureFor(series, metric, mode) {
     const rawYears = rowsByYear(series, metric);
     const years = [...rawYears.keys()].sort((a, b) => a - b);
     if (!years.length) return null;
     const current = currentYear();
-    const previous = current - 1;
     const transformed = transformedYears(rawYears, metric, mode);
     const latest = latestValid(transformed.get(current) || []);
     const band = seasonBand(series, metric, mode, transformed, years);
@@ -525,19 +535,17 @@
       traces.push({type: 'scatter', mode: 'lines', x, y: band.p25, fill: 'tonexty',
         fillcolor: 'rgba(125,130,138,.26)', line: {width: 0}, name: '历史 P25—P75', showlegend: false, hoverinfo: 'skip'});
     }
-    const highlighted = new Set([2015, 2016, previous, current]);
-    for (const year of years.filter(value => value >= 2015 && value <= current && !highlighted.has(value))) {
+    const emphasis = seasonYearStyles(metric, current);
+    const highlighted = new Set(emphasis.map(style => style.year));
+    const mutedYears = metric === 'tmin' ? [] : years.filter(value => value >= 2015 && value <= current && !highlighted.has(value));
+    for (const year of mutedYears) {
       const entries = transformed.get(year);
       traces.push({type: 'scatter', mode: 'lines', x: entries.map(entry => `2000-${entry.mmdd}`),
         y: entries.map(entry => entry.value), name: String(year), showlegend: false,
         opacity: .58, line: {color: mutedPalette[((year - 2017) % mutedPalette.length + mutedPalette.length) % mutedPalette.length], width: 1.2},
         hovertemplate: `${year} %{x|%m-%d}<br>%{y:.2f} ${metricUnits[metric]}<extra></extra>`});
     }
-    const emphasis = [[2015, '#8B00FF', 'circle', '#E6D7FF', '#9900FF'],
-      [2016, '#0000FF', 'circle', '#DAE3F3', '#0000FF'],
-      [previous, '#000000', 'circle', '#E7E6E6', '#000000'],
-      [current, '#FF0000', 'square', '#FFF2CC', '#ED7D31']];
-    for (const [year, color, symbol, fill, border] of emphasis) {
+    for (const {year, color, symbol = 'circle', fill, border} of [...emphasis].reverse()) {
       const entries = transformed.get(year);
       if (!entries || traces.some(trace => trace.name === String(year))) continue;
       traces.push({type: 'scatter', mode: 'lines+markers', x: entries.map(entry => `2000-${entry.mmdd}`),
@@ -557,10 +565,12 @@
         showgrid: false, linecolor: '#cbd3d9', rangeslider: {visible: false}},
       yaxis: {title: {text: metricUnits[metric]}, gridcolor: '#edf0f2', rangemode: cumulativeMetrics.has(metric) ? 'tozero' : 'normal'}
     };
-    return {traces, layout, context, latest, title, current, previous};
+    return {traces, layout, context, latest, title, emphasis};
   }
   const plotOptions = {displaylogo: false, responsive: true, scrollZoom: false, modeBarButtonsToRemove: ['lasso2d', 'select2d']};
-  function chartCaptionFor(mode) {
+  function chartCaptionFor(metric, mode) {
+    if (metric === 'tmin')
+      return `按当地日期取完整日的逐小时气温最低值，汇总沿用产区权重。灰带为 2006–${referenceEnd()} 年同日的 P25—P75。`;
     return mode === 'weekly'
       ? '完整自然周仅在周日绘点；相同月日前后 3 天内的历年完整周作分位比较，不绘周度分位带。'
       : `灰带按 2006–${referenceEnd()} 年相同月日的有效${modeNames[mode]}值计算 P25—P75；其他年份沿用原版八色细线。`;
@@ -598,8 +608,10 @@
     els.chartCard.hidden = true;
     if (els.chart.data && window.Plotly) Plotly.purge(els.chart);
     els.timeGalleryTitle.textContent = `${displayName(region)} · ${metricNames[metric]} · 全部时间口径`;
-    els.timeGallerySummary.textContent = `同时展示 ${choices.length} 种既有口径，使用相同的汇总序列与原季节图配色；数据至 ${fmtDate(series.coverage?.last_complete_date)}。`;
-    renderSeasonLegend(els.timeGalleryLegend); els.timeGallerySection.hidden = false;
+    els.timeGallerySummary.textContent = metric === 'tmin'
+      ? `展示最近五年的日最低气温；数据至 ${fmtDate(series.coverage?.last_complete_date)}。`
+      : `同时展示 ${choices.length} 种既有口径，使用相同的汇总序列与原季节图配色；数据至 ${fmtDate(series.coverage?.last_complete_date)}。`;
+    renderSeasonLegend(metric, els.timeGalleryLegend); els.timeGallerySection.hidden = false;
     els.percentile.textContent = '每张季节图分别标示本口径的历史同期位置；上方近 7 日卡片始终使用独立的同口径 7 日历史窗口。';
     els.details.hidden = false;
     let rendered = 0;
@@ -610,7 +622,7 @@
       const plot = document.createElement('div'); plot.className = 'climate-gallery-chart';
       plot.setAttribute('aria-label', `${displayName(region)} ${metricNames[metric]} ${label}季节图`);
       const reading = document.createElement('p'); reading.className = 'climate-gallery-reading';
-      const caption = document.createElement('p'); caption.className = 'climate-chart-caption'; caption.textContent = chartCaptionFor(mode);
+      const caption = document.createElement('p'); caption.className = 'climate-chart-caption'; caption.textContent = chartCaptionFor(metric, mode);
       card.append(title, plot, reading, caption); els.timeGallery.append(card);
       try {
         const figure = figureFor(series, metric, mode);
@@ -672,10 +684,9 @@
       countryShare !== null ? `${countryBasis} ${(countryShare * 100).toFixed(2)}%` : '',
       els.macro.value && groupShare !== null ? `本区域占比 ${(groupShare * 100).toFixed(2)}%` : ''].filter(Boolean).join(' · ');
   }
-  function renderSeasonLegend(container = els.galleryLegend) {
-    const year = currentYear();
+  function renderSeasonLegend(metric, container = els.galleryLegend) {
     const keys = [['历史 P25—P75', 'rgba(125,130,138,.26)', 'band'],
-      [`${year} · 今年`, '#FF0000'], [`${year - 1} · 去年`, '#000000'], ['2016', '#0000FF'], ['2015', '#8B00FF']];
+      ...seasonYearStyles(metric).map(({year, label, color}) => [label || String(year), color])];
     container.replaceChildren();
     for (const [label, color, style] of keys) {
       const key = document.createElement('span'), swatch = document.createElement('i');
@@ -729,7 +740,7 @@
     els.gallerySummary.textContent = `共 ${regions.length} 个候选产区，${available} 个已导出序列${pending ? `，${pending} 个已选点、历史下载待完成` : ''}。${productionCount
       ? ` ${productionCount} 个有${crop === 'palm' ? '官方' : '工作簿'}参考产量，按产量占比从高到低排列；其余列在后方。`
       : ' 尚无可比较的完整参考产量，暂按产区名称排列。'}`;
-    renderSeasonLegend(); els.gallerySection.hidden = false;
+    renderSeasonLegend(metric); els.gallerySection.hidden = false;
     galleryObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
@@ -771,8 +782,8 @@
     if (!figure || !window.Plotly) { els.chartCard.hidden = true; setStatus('所选指标暂无有效数据或图表库未加载。', true); return; }
     els.chartTitle.textContent = figure.title;
     els.chartSubtitle.textContent = `${displayName(selectedRegion)} · 以每年相同月日对齐 · 数据至 ${fmtDate(selectedSeries.coverage?.last_complete_date)}`;
-    els.chartKey.textContent = `${figure.current}（今年）红线 · ${figure.previous}（去年）黑线 · 2016 蓝线 · 2015 紫线`;
-    els.chartCaption.textContent = chartCaptionFor(mode);
+    els.chartKey.textContent = figure.emphasis.map(({year, label, colorName}) => `${label || year} ${colorName}线`).join(' · ');
+    els.chartCaption.textContent = chartCaptionFor(metric, mode);
     els.chartCard.hidden = false;
     try {
       await Plotly.react(els.chart, figure.traces, figure.layout, plotOptions);
