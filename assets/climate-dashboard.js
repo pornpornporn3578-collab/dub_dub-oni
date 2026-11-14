@@ -582,6 +582,7 @@
   const nasaMetrics = {tmax: 'T2M_MAX', tmin: 'T2M_MIN', tmean: 'T2M', precip: 'PRECTOTCORR'};
   const nasaCache = new Map();
   let nasaCatalog;
+  let nasaPublishedFiles;
   let stationData;
   let stationLoad;
   let stationVersion = 0;
@@ -632,6 +633,24 @@
         latitude: point.latitude, longitude: point.longitude, start: `${currentYear() - 4}0101`,
         end: new Date().toISOString().slice(0, 10).replaceAll('-', ''), format: 'JSON', 'time-standard': 'UTC'});
       const request = (async () => {
+        if (!nasaPublishedFiles) {
+          nasaPublishedFiles = fetch(new URL('nasa-power/index.json', base), {cache: 'no-store'})
+            .then(async response => response.ok ? (await response.json()).files : null)
+            .catch(() => null);
+        }
+        const filename = (await nasaPublishedFiles)?.[pointId];
+        if (/^g_-?\d+_-?\d+\.json$/.test(filename)) {
+          try {
+            const saved = await fetch(new URL(`nasa-power/${filename}`, base));
+            if (saved.ok) {
+              const series = await saved.json();
+              if (series.schema_version === 1 && Array.isArray(series.columns) && Array.isArray(series.daily))
+                return series;
+            }
+          } catch {
+            // A missing snapshot can still be retrieved from the upstream API.
+          }
+        }
         const response = await fetch(endpoint, {signal: AbortSignal.timeout(18000)});
         if (!response.ok) throw new Error(`NASA POWER HTTP ${response.status}`);
         const payload = await response.json();
@@ -704,7 +723,7 @@
       const location = nasa ? displayName(result.region) : '勐腊站（56969）';
       $('ogimet-chart-title').textContent = `${location} · ${metricNames[metric]} · ${measureLabel(metric, mode)}`;
       $('ogimet-chart-basis').textContent = nasa
-        ? `NASA POWER · UTC 日界 · 查询点 ${result.point.latitude}°, ${result.point.longitude}°`
+        ? `NASA POWER · UTC 日界 · 产区代表点 ${result.point.latitude}°, ${result.point.longitude}°${series.schema_version === 1 ? ' · 网站快照' : ' · 在线查询'}`
         : 'Ogimet SYNOP 日报 · 截至北京时间 08:00 · 近期及可取得的往年秋季日值';
       if (!nasa) $('ogimet-link').href = series.source_url;
       const extent = traces.flatMap(trace => trace.x.filter((_, i) => trace.y[i] !== null)).sort();
