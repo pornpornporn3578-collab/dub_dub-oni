@@ -34,6 +34,7 @@
     daily: '日度', weekly: '完整自然周', rolling7: '7 日滚动', rolling15: '15 日滚动', yearly: '全年累计'
   };
   const cumulativeMetrics = new Set(['precip', 'rain_hours', 'vpd_high_hours']);
+  const requiredRecordYears = 3;
   const metricModes = {
     precip: [['weekly', '完整自然周总量'], ['rolling15', '15 日滚动累计'], ['yearly', '全年累计'], ['daily', '日度总量']],
     rain_hours: [['weekly', '完整自然周总量'], ['rolling15', '15 日滚动累计'], ['yearly', '全年累计']],
@@ -45,6 +46,7 @@
   const els = {
     section: $('climate-section'), status: $('climate-load-status'), generated: $('climate-generated'),
     source: $('climate-source'), sourceNote: $('climate-source-note'), galleryCaption: $('climate-gallery-caption'),
+    coverageList: $('climate-source-coverage-list'),
     crop: $('climate-crop'), country: $('climate-country'), scale: $('climate-scale'), macro: $('climate-macroregion'), search: $('climate-region-search'), region: $('climate-region'),
     metric: $('climate-metric'), mode: $('climate-aggregation'), regionHead: $('climate-region-head'),
     regionTitle: $('climate-region-title'), regionSubtitle: $('climate-region-subtitle'),
@@ -83,10 +85,8 @@
   function displayName(region) { return region.name || region.name_zh || region.name_original || region.id; }
   function isGroupScale() { return els.scale.value === 'country' || els.scale.value === 'subregion'; }
   function modeChoices(metric, scope = activeScope()) {
-    if (!metric) return [];
     const choices = metricModes[metric] || [['daily', '日度']];
-    return climateSource === 'era5' ? choices : choices.filter(([mode]) =>
-      scope.some(region => region.metric_modes?.[metric]?.includes(mode)));
+    return metric ? choices.filter(([mode]) => scope.some(region => region.metric_modes?.[metric]?.includes(mode))) : [];
   }
   function populateModes(preferred = els.mode.value, scope = activeScope()) {
     const modes = modeChoices(els.metric.value, scope);
@@ -111,9 +111,9 @@
   }
   function populateMacroRegions(preferred = '') {
     const country = els.country.value;
-    const regions = countryRegions(country).filter(hasSeries);
+    const regions = countryRegions(country).filter(hasRecentSeries);
     const groups = els.scale.value === 'country' ? [] : countryGroups(country, 'subnational').filter(group =>
-      els.scale.value === 'subregion' ? hasSeries(group) : regions.some(region => inMacroRegion(region, group)));
+      els.scale.value === 'subregion' ? hasRecentSeries(group) : regions.some(region => inMacroRegion(region, group)));
     els.macro.replaceChildren(option('', '全部区域'), ...groups.map(group => option(group.id, displayName(group))));
     if (groups.some(group => group.id === preferred)) els.macro.value = preferred;
     els.macro.disabled = !groups.length;
@@ -135,8 +135,18 @@
   }
   function isGallery() { return els.scale.value === 'region' && els.region.value === '__all'; }
   function hasSeries(region) { return Boolean(region.series_file); }
+  function qualifyingModes(entity) {
+    const current = currentYear();
+    const requiredYears = Array.from({length: requiredRecordYears}, (_, offset) => current - offset);
+    const measures = Object.entries(entity.metric_mode_years || {}).map(([metric, modes]) => [
+      metric, Object.keys(modes).filter(mode => metricModes[metric]?.some(([value]) => value === mode) &&
+        requiredYears.every(year => modes[mode].includes(year)))
+    ]);
+    return Object.fromEntries(measures.filter(([, modes]) => modes.length));
+  }
+  function withRecentModes(entity) { return {...entity, metric_modes: qualifyingModes(entity)}; }
+  function hasRecentSeries(entity) { return hasSeries(entity) && Object.keys(entity.metric_modes).length > 0; }
   function matchesMeasure(region) {
-    if (climateSource === 'era5') return true;
     const modes = region.metric_modes?.[els.metric.value] || [];
     return els.mode.value === '__all_modes' ? modes.length > 0 : modes.includes(els.mode.value);
   }
@@ -195,7 +205,7 @@
   }
   function visibleEntities() {
     const term = els.search.value.trim().toLocaleLowerCase();
-    const regions = countryEntities(els.country.value).filter(region => hasSeries(region) && (!term ||
+    const regions = countryEntities(els.country.value).filter(region => hasRecentSeries(region) && (!term ||
       [displayName(region), region.name_original, region.id].filter(Boolean).join(' ').toLocaleLowerCase().includes(term)));
     return els.scale.value === 'region' ? sortRegions(regions) : regions;
   }
@@ -203,16 +213,26 @@
     const entities = visibleEntities();
     return isGallery() ? entities : entities.filter(region => region.id === els.region.value);
   }
+  function countryCoverage(countries, regions, groups, isAvailable) {
+    const counts = new Map();
+    for (const region of regions.filter(isAvailable))
+      counts.set(region.country_iso3, (counts.get(region.country_iso3) || 0) + 1);
+    for (const group of groups.filter(isAvailable))
+      if (!counts.has(group.country_iso3)) counts.set(group.country_iso3, 0);
+    return countries.flatMap(country => {
+      const iso3 = country.iso3 || country.country_iso3;
+      return counts.has(iso3) ? [{iso3, name: country.name || country.name_zh || iso3, count: counts.get(iso3)}] : [];
+    });
+  }
   function populateCountries(selection = {}) {
     els.country.replaceChildren();
     for (const country of catalog.countries || []) {
       const iso3 = country.iso3 || country.country_iso3;
       if (!iso3) continue;
       countryNames.set(iso3, country.name || country.name_zh || iso3);
-      const count = countryRegions(iso3).filter(hasSeries).length;
-      if (count || countryGroups(iso3, 'country').some(hasSeries) || countryGroups(iso3, 'subnational').some(hasSeries))
-        els.country.append(option(iso3, count ? `${countryNames.get(iso3)} · ${count} 区` : countryNames.get(iso3)));
     }
+    for (const {iso3, name, count} of countryCoverage(catalog.countries, catalog.regions, catalog.groups, hasRecentSeries))
+      els.country.append(option(iso3, count ? `${name} · ${count} 区` : name));
     for (const entry of document.getElementById('risk-country')?.options || []) {
       const riskCountry = (tapping?.countries || []).find(item => item.country_iso3 === entry.value);
       if (riskCountry?.label) entry.textContent = riskCountry.label;
@@ -229,7 +249,7 @@
     populateRegions(selection.region, selection.metric, selection.mode);
   }
   function populateScales(preferred = els.scale.value) {
-    const choices = scaleOptions.filter(([scale]) => countryEntities(els.country.value, scale, '').some(hasSeries));
+    const choices = scaleOptions.filter(([scale]) => countryEntities(els.country.value, scale, '').some(hasRecentSeries));
     els.scale.replaceChildren(...choices.map(([value, label]) => option(value, label)));
     els.scale.disabled = !choices.length;
     els.scale.value = choices.some(([value]) => value === preferred) ? preferred
@@ -248,7 +268,8 @@
     ++selectedToken;
     selectedRegion = null;
     clearGallery();
-    clearSelection(els.country.options.length ? '没有符合筛选条件的产区。' : '所选数据源暂无此品种的可用产区。');
+    clearSelection(els.country.options.length ? '没有符合筛选条件的产区。'
+      : `所选数据源暂无此品种中连续近 ${requiredRecordYears} 年有记录的国家或地区。`);
   }
   function populateRegionOptions(regions = visibleEntities(), preferredId = els.region.value) {
     const choices = regions.filter(matchesMeasure);
@@ -934,13 +955,16 @@
       return hasSeries(entity) && day > latest ? day : latest;
     }, '');
   }
-  function updateSourceDates(variety) {
+  function updateSourceSummary(variety) {
+    const geography = loadClimateIndex('era5', variety);
+    const summary = document.createDocumentFragment();
     for (const entry of els.source.options) {
       const name = sourceLabels.get(entry.value);
       entry.textContent = name;
       entry.removeAttribute('title');
       const source = entry.value;
-      void loadClimateIndex(source, variety).then(index => {
+      const data = loadClimateIndex(source, variety);
+      void data.then(index => {
         if (variety !== crop) return;
         const entities = source === 'era5' ? (index.regions || []) : Object.values(index.entities || {});
         const latest = latestSeriesDate(entities);
@@ -957,7 +981,26 @@
           entry.title = entry.textContent;
         }
       });
+      if (source === 'era5') continue;
+      const row = document.createElement('div');
+      const heading = document.createElement('dt');
+      heading.textContent = name;
+      const coverage = document.createElement('dd');
+      coverage.textContent = '正在读取覆盖范围…';
+      row.append(heading, coverage);
+      summary.append(row);
+      void Promise.all([geography, data]).then(([geo, index]) => {
+        if (index.schema_version !== 1 || !index.entities) throw new Error('Invalid source index');
+        const eligible = entry => {
+          const series = index.entities[entry.id];
+          return series && hasRecentSeries(withRecentModes(series));
+        };
+        const countries = countryCoverage(geo.countries, geo.regions, geo.groups || [], eligible);
+        coverage.textContent = countries.length && countries.length === geo.countries.length ? '全部包含'
+          : countries.map(({name}) => name).join('、') || '暂无符合近 3 年条件的国家';
+      }).catch(() => { coverage.textContent = '覆盖范围暂不可用'; });
     }
+    els.coverageList.replaceChildren(summary);
   }
   async function initClimate(selection = {}) {
     const token = ++catalogToken;
@@ -973,24 +1016,27 @@
     try {
       const geo = loadClimateIndex('era5', requestedCrop);
       const overlay = requestedSource === 'era5' ? null
-        : loadClimateIndex(requestedSource, requestedCrop).catch(() => null);
+        : loadClimateIndex(requestedSource, requestedCrop);
       const [geography, extra] = await Promise.all([geo, overlay]);
       if (token !== catalogToken) return;
       if (geography.schema_version !== 1 || !Array.isArray(geography.regions) || !Array.isArray(geography.countries))
         throw new Error('数据目录格式不符合 schema v1');
       const data = {...geography};
       if (requestedSource !== 'era5') {
-        const attach = entity => ({...entity, series_file: null, coverage: null, ...extra?.entities?.[entity.id]});
+        if (extra.schema_version !== 1 || !extra.entities) throw new Error('来源目录格式不符合 schema v1');
+        const attach = entity => ({
+          ...entity, series_file: null, coverage: null, metric_mode_years: null, ...extra.entities[entity.id]
+        });
         data.regions = data.regions.map(attach);
         data.groups = (data.groups || []).map(attach);
-        data.source = {dataset: label, reference_years: extra?.reference_years};
+        data.source = {dataset: label, reference_years: extra.reference_years};
       }
-      catalog = data;
+      const latest = latestSeriesDate(data.regions);
+      catalog = {...data, regions: data.regions.map(withRecentModes), groups: (data.groups || []).map(withRecentModes)};
       $('climate-region-count').textContent = String(data.regions.length);
-      $('climate-series-count').textContent = String(data.regions.filter(region => region.series_file).length);
+      $('climate-series-count').textContent = String(catalog.regions.filter(hasRecentSeries).length);
       $('climate-baseline-years').textContent = [...new Set(data.source?.reference_years || [])].join('–') || '—';
       $('climate-latest-label').textContent = requestedSource === 'era5' ? '最新完整日' : '最新有效日';
-      const latest = latestSeriesDate(data.regions);
       $('climate-latest-date').textContent = latest || '—';
       els.generated.textContent = requestedSource !== 'era5'
         ? `${label} · 最新有效日 ${latest || '—'}`
@@ -999,7 +1045,7 @@
     } catch (error) {
       if (token !== catalogToken) return;
       els.generated.textContent = '本地数据目录尚未就绪';
-      setStatus(`无法读取 ${crop === 'palm' ? '棕榈' : '橡胶'}数据目录：${error.message}。请使用本地预览服务打开，等待气候数据导出后刷新。`, true);
+      setStatus(`无法读取 ${label} 的${crop === 'palm' ? '油棕' : '橡胶'}数据目录（${error.message}）。`, true);
     }
   }
   function changeClimateCatalog(keepScope) {
@@ -1019,7 +1065,7 @@
     for (const field of [els.country, els.scale, els.macro, els.region, els.search, els.metric, els.mode]) field.disabled = true;
     for (const id of ['climate-region-count', 'climate-series-count', 'climate-latest-date', 'climate-baseline-years']) $(id).textContent = '—';
     void initClimate(selection);
-    if (previousCrop !== crop) updateSourceDates(crop);
+    if (previousCrop !== crop) updateSourceSummary(crop);
   }
   function changeRegion() {
     populateMetrics(activeScope());
@@ -1052,7 +1098,7 @@
   document.querySelector('[data-view="climate"]')?.addEventListener('click', activateClimate);
   window.addEventListener('hashchange', () => { if (location.hash === '#climate') activateClimate(); });
   void initClimate();
-  updateSourceDates(crop);
+  updateSourceSummary(crop);
 
   // 割胶风险导出与气候序列分开读取；没有导出文件时只显示明确的等待状态。
   const risk = {
