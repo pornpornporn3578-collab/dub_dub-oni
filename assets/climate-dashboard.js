@@ -4,8 +4,22 @@
   const $ = id => document.getElementById(id);
   const base = new URL('data/', document.baseURI);
   let climateBase = base;
+  let climateSource = 'era5';
   let crop = 'rubber';
   let catalogToken = 0;
+  const sources = {
+    era5: {label: 'ERA5-Land', note: 'ERA5-Land 为历史再分析，使用最近的 0.1° 格点，按各点当地日期统计。产区曲线沿用目录中的样本权重。'},
+    ogimet: {label: 'Ogimet SYNOP', station: true, note: '各采样点匹配同国 75 公里内最近的可用台站。每日按截至 00:00 UTC 的过去 24 小时汇总。地区汇总沿用目录权重，并按参与统计的样本重新归一。',
+      links: [['Ogimet 台站日报', 'https://www.ogimet.com/gsynres.phtml.en']]},
+    'nasa-power': {label: 'NASA POWER', note: '0.5° × 0.625° 日度气象格点，按 UTC 日统计。产区采用 ERA5-Land 目录中的采样点和权重。',
+      links: [['NASA POWER 日度数据', 'https://power.larc.nasa.gov/docs/services/api/temporal/daily/']]},
+    'noaa-cpc': {label: 'NOAA CPC', note: 'NOAA PSL 提供的 CPC 0.5° 陆地格点分析。温度使用 06:00 UTC 至次日 06:00 UTC 的观测极值。降水沿用 CPC 原始日期，站网统计日界随国家而异。',
+      links: [['NOAA PSL 气温', 'https://psl.noaa.gov/data/gridded/data.cpc.globaltemp.html'],
+        ['NOAA PSL 降水', 'https://psl.noaa.gov/data/gridded/data.cpc.globalprecip.html']]},
+    'noaa-ghcn': {label: 'NOAA GHCN-D', station: true,
+      note: '同国 75 公里内按近期是否有记录、距离匹配台站。逐日数据保留 NOAA NCEI 的原始日期及各台站日界，剔除质量标记不合格的值。',
+      links: [['NOAA NCEI 台站资料', 'https://www.ncei.noaa.gov/products/land-based-station/global-historical-climatology-network-daily']]}
+  };
   const metricNames = {
     tmean: '平均气温', tmax: '最高气温', tmin: '最低气温', precip: '降水量', rain_hours: '降水小时数',
     soil1: '浅层土壤湿度（0–7 cm）', soil2: '土壤湿度（7–28 cm）',
@@ -30,6 +44,7 @@
   const mutedPalette = ['#b0b7bf', '#d39e40', '#6b91c6', '#5ca988', '#c4775f', '#aaa2bb', '#7fa5c1', '#b99072'];
   const els = {
     section: $('climate-section'), status: $('climate-load-status'), generated: $('climate-generated'),
+    source: $('climate-source'), sourceNote: $('climate-source-note'), galleryCaption: $('climate-gallery-caption'),
     crop: $('climate-crop'), country: $('climate-country'), scale: $('climate-scale'), macro: $('climate-macroregion'), search: $('climate-region-search'), region: $('climate-region'),
     metric: $('climate-metric'), mode: $('climate-aggregation'), regionHead: $('climate-region-head'),
     regionTitle: $('climate-region-title'), regionSubtitle: $('climate-region-subtitle'),
@@ -42,6 +57,7 @@
     coverage: $('climate-coverage-detail'), gallerySection: $('climate-gallery-section'), gallery: $('climate-gallery'),
     galleryTitle: $('climate-gallery-title'), gallerySummary: $('climate-gallery-summary'), galleryLegend: $('climate-gallery-legend')
   };
+  const metricOptions = [...els.metric.options].map(({value, textContent}) => [value, textContent]);
   let catalog = null;
   let selectedRegion = null;
   let selectedSeries = null;
@@ -59,18 +75,30 @@
     return Number(new Intl.DateTimeFormat('en', {timeZone: 'Asia/Shanghai', year: 'numeric'}).format(new Date()));
   }
   function referenceEnd() {
-    return Math.min(Number(catalog?.source?.reference_years?.[1] || 2025), currentYear() - 1);
+    return Math.min(catalog?.source?.reference_years?.[1] ?? (climateSource === 'era5' ? 2025 : 0), currentYear() - 1);
   }
   function displayName(region) { return region.name || region.name_zh || region.name_original || region.id; }
   function isGroupScale() { return els.scale.value === 'country' || els.scale.value === 'subregion'; }
-  function availableModes() {
-    const choices = metricModes[els.metric.value] || [['daily', '日度']];
-    return isGroupScale() ? [['__all_modes', '全部显示'], ...choices] : choices;
+  function modeChoices(metric, scope = activeScope()) {
+    if (!metric) return [];
+    const choices = metricModes[metric] || [['daily', '日度']];
+    return climateSource === 'era5' ? choices : choices.filter(([mode]) =>
+      scope.some(region => region.metric_modes?.[metric]?.includes(mode)));
   }
   function populateModes(preferred = els.mode.value) {
-    const choices = availableModes();
+    const modes = modeChoices(els.metric.value);
+    const choices = isGroupScale() && modes.length ? [['__all_modes', '全部显示'], ...modes] : modes;
     els.mode.replaceChildren(...choices.map(([value, label]) => option(value, label)));
-    els.mode.value = choices.some(([value]) => value === preferred) ? preferred : choices[0][0];
+    els.mode.disabled = !choices.length;
+    els.mode.value = choices.some(([value]) => value === preferred) ? preferred : choices[0]?.[0] || '';
+  }
+  function populateMetrics(preferred = els.metric.value, preferredMode = els.mode.value) {
+    const choices = climateSource === 'era5' ? metricOptions : metricOptions.filter(([metric]) =>
+      activeScope().some(region => region.metric_modes?.[metric]?.length));
+    els.metric.replaceChildren(...choices.map(([value, label]) => option(value, label)));
+    els.metric.disabled = !choices.length;
+    els.metric.value = choices.some(([value]) => value === preferred) ? preferred : choices[0]?.[0] || '';
+    populateModes(preferredMode);
   }
   function macroGroups(iso3 = els.country.value) {
     return (catalog?.groups || []).filter(group => group.country_iso3 === iso3 && group.type === 'subnational' &&
@@ -99,10 +127,14 @@
   }
   function isGallery() { return els.scale.value === 'region' && els.region.value === '__all'; }
   function isPendingDownload(region) {
+    if (climateSource !== 'era5') return false;
     return region.coverage?.status === 'pending_download' || region.download_status === 'pending_download' || region.aggregation === 'pending_download' ||
       (!region.series_file && Boolean(region.point_ids?.length || region.selectedpoint_ids?.length || region.selected_point_ids?.length));
   }
   function missingSeriesText(region) {
+    if (climateSource !== 'era5') return sources[climateSource].station
+      ? '同国 75 公里内暂无具备可用日报的匹配台站。'
+      : '所选数据源在此产区暂无有效日值。';
     return isPendingDownload(region)
       ? '已选定气候格点，2006 年以来的历史下载尚未完成；并非该地区没有气象资料。下载及导出完成后刷新即可绘图。'
       : '此产区尚未确定可用气候格点或尚未导出序列；不会用其他地区的数据代替。';
@@ -163,7 +195,16 @@
       !(Array.isArray(group.region_ids) && group.region_ids.length === 0) &&
       (type === 'country' || !macro || group.id === macro.id));
   }
-  function populateCountries() {
+  function visibleEntities() {
+    const term = els.search.value.trim().toLocaleLowerCase();
+    return countryEntities(els.country.value).filter(region => !term ||
+      [displayName(region), region.name_original, region.id].filter(Boolean).join(' ').toLocaleLowerCase().includes(term));
+  }
+  function activeScope() {
+    const entities = visibleEntities();
+    return isGallery() ? entities : entities.filter(region => region.id === els.region.value);
+  }
+  function populateCountries(selection = {}) {
     els.country.replaceChildren();
     for (const country of catalog.countries || []) {
       const iso3 = country.iso3 || country.country_iso3;
@@ -182,36 +223,38 @@
     els.search.disabled = !els.country.options.length;
     const preferred = [...els.country.options].find(entry => entry.value === 'THA') ||
       [...els.country.options].find(entry => countryRegions(entry.value).some(region => region.series_file));
-    if (preferred) els.country.value = preferred.value;
-    els.scale.value = 'region';
-    populateMacroRegions();
-    populateModes();
-    populateRegions();
+    els.country.value = [...els.country.options].some(entry => entry.value === selection.country)
+      ? selection.country : (preferred?.value || els.country.options[0]?.value || '');
+    els.scale.value = selection.scale || 'region';
+    populateMacroRegions(selection.macro);
+    populateRegions(selection.region, selection.metric, selection.mode);
   }
-  function populateRegions(preferredId = '') {
+  function populateRegions(preferredId = '', preferredMetric, preferredMode) {
     els.search.placeholder = els.scale.value === 'region' ? '中文名或原文名' : '搜索国别或大区样本';
-    const term = els.search.value.trim().toLocaleLowerCase();
-    const regions = countryEntities(els.country.value).filter(region =>
-      !term || `${region.name || ''} ${region.name_zh || ''} ${region.name_original || ''} ${region.id || ''}`.toLocaleLowerCase().includes(term));
+    const regions = visibleEntities();
     els.region.replaceChildren();
     if (els.scale.value === 'region' && regions.length) els.region.append(option('__all', `全部显示 · ${regions.length} 个产区`));
     for (const region of regions) {
       const name = region.name || region.name_zh || region.name_original || region.id;
-      const label = `${name}${region.name_original && region.name_zh && !region.name ? ` · ${region.name_original}` : ''}${region.series_file ? '' : isPendingDownload(region) ? '（下载中）' : '（待选点）'}`;
+      const unavailable = climateSource !== 'era5' ? '（暂无数据）' : isPendingDownload(region) ? '（下载中）' : '（待选点）';
+      const label = `${name}${region.name_original && region.name_zh && !region.name ? ` · ${region.name_original}` : ''}${region.series_file ? '' : unavailable}`;
       els.region.append(option(region.id, label));
     }
     els.region.disabled = !regions.length;
     if (els.scale.value === 'region' && regions.length && (!preferredId || preferredId === '__all')) {
       els.region.value = '__all';
+      populateMetrics(preferredMetric, preferredMode);
       void renderGallery();
       return;
     }
     const preferred = regions.find(region => region.id === preferredId) || regions.find(region => region.series_file) || regions[0];
     if (preferred) {
       els.region.value = preferred.id;
+      populateMetrics(preferredMetric, preferredMode);
       void selectRegion(preferred.id);
     } else {
       selectedRegion = null;
+      populateMetrics(preferredMetric, preferredMode);
       clearGallery();
       clearSelection('没有符合搜索条件的地区或样本组。');
     }
@@ -269,6 +312,24 @@
     els.quality.textContent = aggregationLabel(region.aggregation);
     els.quality.classList.toggle('is-unavailable', !region.series_file);
     els.quality.classList.toggle('is-provisional', Boolean(region.series_file));
+    if (climateSource !== 'era5') {
+      els.regionType.textContent = isGroup ? '样本范围历史气候' : sources[climateSource].station ? '产区参考台站' : '产区格点历史气候';
+      els.quality.textContent = region.series_file ? sources[climateSource].label : '暂无数据';
+      const units = isGroup ? '产区' : '采样点';
+      const stations = region.stations || [];
+      const stationText = stations.slice(0, 5).map(info =>
+        `${info.name}（${info.id}，${info.distance_km.toFixed(1)} km）`).join('、');
+      const metricText = Object.entries(region.metric_members || {}).map(([metric, count]) =>
+        `${metricNames[metric]} ${count}/${region.total_members}`).join(' · ');
+      els.coverage.textContent = region.series_file ? [
+        `日期范围 ${fmtDate(cov.first_date)}—${fmtDate(cov.last_complete_date)}`,
+        `至少一项指标有效 ${cov.complete_days} 天 · 区间内无有效值 ${cov.missing_days} 天`,
+        `各指标参与统计的${units}数  ${metricText}`,
+        stations.length ? `参考台站 ${stations.length} 个（距离为到匹配采样点）  ${stationText}${stations.length > 5 ? ' 等' : ''}` : '',
+        sources[climateSource].note
+      ].filter(Boolean).join('\n') : missingSeriesText(region);
+      return;
+    }
     const pointCount = region.point_ids?.length ?? series?.point_ids?.length ?? 0;
     const coverageText = [
       `完整日期：${fmtDate(cov.first_date)}—${fmtDate(cov.last_complete_date)}。`,
@@ -377,7 +438,7 @@
       if (matches.length) values.push(matches.reduce((sum, entry) => sum + entry.value, 0) / matches.length);
     }
     basis = mode === 'weekly' ? '相同月日前后 3 天的完整自然周' : '相同月日';
-    if (values.length < 5) return {label: '历史样本不足', note: `${basis}只有 ${values.length} 年有效汇总值。`};
+    if (values.length < 5) return {label: '历史样本不足', sample: values.length, note: `${basis}只有 ${values.length} 年有效汇总值。`};
     const rank = Math.round(100 * (values.filter(value => value < latest.value).length +
       .5 * values.filter(value => value === latest.value).length) / values.length);
     return {label: `约 P${rank}`, rank, sample: values.length,
@@ -414,7 +475,8 @@
     const latest = sevenDayWindow(series, metric, endDate, rows);
     const endingYear = Number(String(endDate).slice(0, 4));
     // Exclude the window's own year too when an older snapshot is displayed.
-    const referenceFirst = 2006, referenceLast = Math.min(currentYear() - 1, endingYear - 1);
+    const referenceFirst = catalog?.source?.reference_years?.[0] ?? currentYear();
+    const referenceLast = Math.min(referenceEnd(), endingYear - 1);
     const values = [];
     if (Number.isFinite(endingYear)) {
       for (let year = referenceFirst; year <= referenceLast; year++) {
@@ -436,7 +498,7 @@
       ['近 7 日平均最高温', 'tmax', '°C'],
       ['近 7 日平均浅层土壤湿度', 'soil1', 'm³/m³'],
       ['近 7 日平均 VPD', 'vpd', 'kPa']
-    ];
+    ].filter(([, metric]) => metricIndex(series, metric) >= 0);
     els.signals.replaceChildren();
     for (const [label, metric, unit] of defs) {
       const comparison = sevenDayComparison(series, metric, lastDate, rows);
@@ -448,12 +510,12 @@
       const percentile = document.createElement('span'); percentile.className = 'climate-signal-percentile';
       percentile.textContent = comparison.rank !== null ? `历史同期约 P${comparison.rank} · ${comparison.sample} 个有效历史年份`
         : `${latest ? '历史样本不足' : '当前窗口不完整'} · ${comparison.sample} 个有效历史年份`;
-      percentile.title = `基准 ${comparison.referenceFirst}–${comparison.referenceLast}；每年相同月日截至的连续 7 日${metric === 'precip' ? '累计降雨' : '平均值'}。有效历史窗口不足 5 年时不计算分位。`;
-      const note = document.createElement('small'); note.textContent = `${fmtDate(lastDate)}止 · ${latest ? '7 个完整日' : '数据不足，不向前寻找替代窗口'}`;
+      percentile.title = '与历年相同月日截至的连续 7 日窗口比较，至少需要 5 个有效历史样本。';
+      const note = document.createElement('small'); note.textContent = `${fmtDate(lastDate)}止 · ${latest ? '7 个完整日' : '窗口不完整'}`;
       card.append(heading, value, percentile, note);
       els.signals.append(card);
     }
-    els.signals.hidden = false;
+    els.signals.hidden = !defs.length;
   }
   function rollingComparison(series, metric) {
     const comparison = sevenDayComparison(series, metric);
@@ -473,25 +535,26 @@
     const cov = selectedSeries.coverage || {};
     const rain = rollingComparison(selectedSeries, 'precip');
     const temp = rollingComparison(selectedSeries, 'tmean');
-    const parts = [`完整气候日截至 ${fmtDate(cov.last_complete_date)}；以下均为 ERA5-Land 历史再分析，非实时观测或天气预报。`];
-    parts.push(rain && rain.rank !== null
+    const isEra5 = climateSource === 'era5';
+    const parts = [`${sources[climateSource].label} 日值截至 ${fmtDate(cov.last_complete_date)}。`];
+    if (metricIndex(selectedSeries, 'precip') >= 0) parts.push(rain && rain.rank !== null
       ? `近 7 日累计降水 ${fmt(rain.latest.value, 'precip')}，在 ${rain.sample} 年相同月日的 7 日窗口中约处 P${rain.rank}。`
       : '近 7 日降水历史比较所需的连续日或同期样本不足。');
-    parts.push(temp && temp.median !== null
+    if (metricIndex(selectedSeries, 'tmean') >= 0) parts.push(temp && temp.median !== null
       ? `近 7 日平均气温 ${fmt(temp.latest.value, 'tmean')}，比历史同期中位数${temp.latest.value >= temp.median ? '高' : '低'} ${Math.abs(temp.latest.value - temp.median).toFixed(1)} °C。`
       : '近 7 日气温历史比较所需的连续日或同期样本不足。');
-    const riskRecord = crop === 'rubber' ? matchingRiskRecord() : null;
+    const riskRecord = isEra5 && crop === 'rubber' ? matchingRiskRecord() : null;
     const riskDay = latestDay(riskRecord);
     if (riskDay) {
       parts.push(`历史天气不利条件等级：${riskLevel(riskDay.risk_level)[0]}（${fmtDate(riskDay.date)}，不利条件占比 ${pct(riskDay.adverse_share)}）；并非实际停割，详见“割胶天气评估”栏目。`);
       if (selectedRegion.weight_basis && riskDay.weight_basis && selectedRegion.weight_basis !== riskDay.weight_basis)
         parts.push('本页气候曲线与割胶不利条件使用不同的样本权重口径，数值不能直接相减或视作同一国别覆盖率。');
-    } else if (crop === 'rubber') {
+    } else if (isEra5 && crop === 'rubber') {
       parts.push('割胶不利天气等级尚未导出或此范围没有可匹配的结果。');
     }
-    parts.push(cov.missing_days > 0
-      ? `覆盖警示：全序列有 ${cov.missing_days} 个不完整日，异常时期请逐项核对小时覆盖与现场天气。`
-      : '覆盖提示：异常时期仍需核对小时覆盖、现场天气和后续预报。');
+    if (cov.missing_days > 0) parts.push(isEra5
+      ? `全序列有 ${cov.missing_days} 个不完整日，异常时期可逐项核对小时覆盖与现场天气。`
+      : `该日期范围内有 ${cov.missing_days} 天缺少全部指标，图中按缺测断线。`);
     els.autoText.textContent = parts.join('\n');
     els.auto.hidden = false;
   }
@@ -536,11 +599,13 @@
       traces.push({type: 'scatter', mode: 'lines', x, y: band.p25, fill: 'tonexty',
         fillcolor: 'rgba(125,130,138,.26)', line: {width: 0}, name: '历史 P25—P75', showlegend: false, hoverinfo: 'skip'});
     }
-    const emphasis = seasonYearStyles(metric, current);
+    const emphasis = seasonYearStyles(metric, current).filter(({year}) =>
+      transformed.get(year)?.some(entry => entry.value !== null));
     const highlighted = new Set(emphasis.map(style => style.year));
     const mutedYears = metric === 'tmin' ? [] : years.filter(value => value >= 2015 && value <= current && !highlighted.has(value));
     for (const year of mutedYears) {
       const entries = transformed.get(year);
+      if (!entries.some(entry => entry.value !== null)) continue;
       traces.push({type: 'scatter', mode: 'lines', x: entries.map(entry => `2000-${entry.mmdd}`),
         y: entries.map(entry => entry.value), name: String(year), showlegend: false,
         opacity: .58, line: {color: mutedPalette[((year - 2017) % mutedPalette.length + mutedPalette.length) % mutedPalette.length], width: 1.2},
@@ -548,7 +613,6 @@
     }
     for (const {year, color, symbol = 'circle', fill, border} of [...emphasis].reverse()) {
       const entries = transformed.get(year);
-      if (!entries || traces.some(trace => trace.name === String(year))) continue;
       traces.push({type: 'scatter', mode: 'lines+markers', x: entries.map(entry => `2000-${entry.mmdd}`),
         y: entries.map(entry => entry.value), name: String(year), showlegend: false,
         line: {color, width: year === current ? 3 : 2.35},
@@ -566,209 +630,18 @@
         showgrid: false, linecolor: '#cbd3d9', rangeslider: {visible: false}},
       yaxis: {title: {text: metricUnits[metric]}, gridcolor: '#edf0f2', rangemode: cumulativeMetrics.has(metric) ? 'tozero' : 'normal'}
     };
-    return {traces, layout, context, latest, title, emphasis};
+    return traces.length ? {traces, layout, context, latest, title, emphasis} : null;
   }
+
   const plotOptions = {displaylogo: false, responsive: true, scrollZoom: false, modeBarButtonsToRemove: ['lasso2d', 'select2d']};
-  const sourceSelect = $('climate-source');
-  const era5Panel = $('climate-era5');
-  const stationPanel = $('climate-ogimet');
-  const era5Stamp = els.generated;
-  const stationMetric = $('ogimet-metric');
-  const stationMode = $('ogimet-mode');
-  const stationChart = $('ogimet-chart');
-  const stationCard = $('ogimet-chart-card');
-  const stationStatus = $('ogimet-status');
-  const nasaCountry = $('nasa-country'), nasaRegion = $('nasa-region');
-  const nasaMetrics = {tmax: 'T2M_MAX', tmin: 'T2M_MIN', tmean: 'T2M', precip: 'PRECTOTCORR'};
-  const nasaCache = new Map();
-  let nasaCatalog;
-  let nasaPublishedFiles;
-  let stationData;
-  let stationLoad;
-  let stationVersion = 0;
-
-  function loadStation() {
-    if (!stationLoad) {
-      stationLoad = fetch(new URL('ogimet-mengla.json', base), {cache: 'no-store'}).then(async response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const series = await response.json();
-        if (series.schema_version !== 1 || series.station_id !== '56969' ||
-            !Array.isArray(series.columns) || !Array.isArray(series.daily))
-          throw new Error('勐腊站数据格式无效');
-        stationData = series;
-        return series;
-      }).finally(() => { stationLoad = null; });
-    }
-    return stationLoad;
-  }
-
-  async function loadNasaRegions() {
-    if (!nasaCatalog) {
-      const response = await fetch(new URL('index.json', base), {cache: 'no-store'});
-      if (!response.ok) throw new Error(`产区目录 HTTP ${response.status}`);
-      nasaCatalog = await response.json();
-      nasaCountry.replaceChildren(...nasaCatalog.countries.filter(country =>
-        nasaCatalog.regions.some(region => region.country_iso3 === country.iso3 && region.point_ids?.length)
-      ).map(country => option(country.iso3, country.name)));
-      nasaCountry.value = nasaCountry.querySelector('option[value="CHN"]') ? 'CHN' : nasaCountry.options[0]?.value;
-      populateNasaRegions('r_85c97819f7f8');
-    }
-  }
-  function populateNasaRegions(preferred) {
-    const regions = sortRegions(nasaCatalog.regions.filter(region =>
-      region.country_iso3 === nasaCountry.value && region.point_ids?.length));
-    nasaRegion.replaceChildren(...regions.map(region => option(region.id, displayName(region))));
-    if (regions.some(region => region.id === preferred)) nasaRegion.value = preferred;
-  }
-  async function loadNasaSeries() {
-    const region = nasaCatalog.regions.find(item => item.id === nasaRegion.value);
-    if (!region) throw new Error('该地区暂无代表格点');
-    const pointId = [...region.point_ids].sort((a, b) =>
-      (region.weights?.[b] || 0) - (region.weights?.[a] || 0))[0];
-    const point = nasaCatalog.points.find(item => item.id === pointId);
-    if (!Number.isFinite(point?.latitude) || !Number.isFinite(point?.longitude)) throw new Error('该产区暂无有效坐标');
-    if (!nasaCache.has(pointId)) {
-      const endpoint = new URL('https://power.larc.nasa.gov/api/temporal/daily/point');
-      endpoint.search = new URLSearchParams({parameters: Object.values(nasaMetrics).join(','), community: 'AG',
-        latitude: point.latitude, longitude: point.longitude, start: `${currentYear() - 4}0101`,
-        end: new Date().toISOString().slice(0, 10).replaceAll('-', ''), format: 'JSON', 'time-standard': 'UTC'});
-      const request = (async () => {
-        if (!nasaPublishedFiles) {
-          nasaPublishedFiles = fetch(new URL('nasa-power/index.json', base), {cache: 'no-store'})
-            .then(async response => response.ok ? (await response.json()).files : null)
-            .catch(() => null);
-        }
-        const filename = (await nasaPublishedFiles)?.[pointId];
-        if (/^g_-?\d+_-?\d+\.json$/.test(filename)) {
-          try {
-            const saved = await fetch(new URL(`nasa-power/${filename}`, base));
-            if (saved.ok) {
-              const series = await saved.json();
-              if (series.schema_version === 1 && Array.isArray(series.columns) && Array.isArray(series.daily))
-                return series;
-            }
-          } catch {
-            // A missing snapshot can still be retrieved from the upstream API.
-          }
-        }
-        const response = await fetch(endpoint, {signal: AbortSignal.timeout(18000)});
-        if (!response.ok) throw new Error(`NASA POWER HTTP ${response.status}`);
-        const payload = await response.json();
-        const data = payload.properties?.parameter;
-        if (payload.header?.time_standard !== 'UTC' || !data ||
-            !Object.values(nasaMetrics).every(name => data[name] && typeof data[name] === 'object'))
-          throw new Error('NASA POWER 日值格式无效');
-        const fill = payload.header.fill_value ?? -999;
-        const daily = Object.keys(data.T2M).sort().filter(key => /^\d{8}$/.test(key)).map(key => [
-          `${key.slice(0, 4)}-${key.slice(4, 6)}-${key.slice(6)}`,
-          ...Object.values(nasaMetrics).map(name => {
-            const value = data[name][key];
-            return Number.isFinite(value) && value !== fill ? value : null;
-          })
-        ]);
-        return {columns: ['date', ...Object.keys(nasaMetrics)], daily};
-      })().catch(error => { nasaCache.delete(pointId); throw error; });
-      nasaCache.set(pointId, request);
-    }
-    const series = await nasaCache.get(pointId);
-    return {series, region, point};
-  }
-
-  async function renderStation() {
-    const version = ++stationVersion;
-    const nasa = sourceSelect.value === 'nasa';
-    const sourceLabel = nasa ? 'NASA POWER' : '勐腊站日报';
-    stationStatus.textContent = `正在读取${sourceLabel}…`;
-    stationStatus.classList.remove('is-error');
-    try {
-      if (nasa) await loadNasaRegions();
-      if (version !== stationVersion || stationPanel.hidden) return;
-      const result = nasa ? await loadNasaSeries() : null;
-      const series = result?.series || stationData || await loadStation();
-      if (version !== stationVersion || stationPanel.hidden) return;
-      const styles = seasonYearStyles('tmin');
-      const metrics = [...els.metric.options].filter(({value}) => {
-        const column = metricIndex(series, value);
-        return column >= 0 && series.daily.some(row =>
-          Number.isFinite(row[column]) && styles.some(({year}) => row[0].startsWith(String(year))));
-      });
-      const preferredMetric = stationMetric.value || els.metric.value;
-      stationMetric.replaceChildren(...metrics.map(({value, textContent}) => option(value, textContent)));
-      if (metrics.some(({value}) => value === preferredMetric)) stationMetric.value = preferredMetric;
-      stationMetric.disabled = !metrics.length;
-      if (!metrics.length) throw new Error('当前选区暂无有效日值');
-      const metric = stationMetric.value;
-      const raw = rowsByYear(series, metric);
-      const available = new Map();
-      for (const [key, label] of metricModes[metric]) {
-        const rows = transformedYears(raw, metric, key);
-        if (styles.some(({year}) => latestValid(rows.get(year) || []))) available.set(key, {label, rows});
-      }
-      const preferredMode = stationMode.value || els.mode.value;
-      stationMode.replaceChildren(...[...available].map(([key, {label}]) => option(key, label)));
-      stationMode.value = available.has(preferredMode) ? preferredMode : available.has('daily') ? 'daily' : stationMode.options[0]?.value;
-      stationMode.disabled = !available.size;
-      const mode = stationMode.value;
-      const rows = available.get(mode).rows;
-      const years = styles.filter(({year}) => latestValid(rows.get(year) || []));
-      if (!years.length) throw new Error('当前指标暂无有效日报');
-      const traces = [...years].reverse().map(({year, color}) => {
-        const entries = rows.get(year);
-        return {type: 'scatter', mode: 'lines+markers', name: String(year),
-          x: entries.map(({mmdd}) => `2000-${mmdd}`), y: entries.map(({value}) => value),
-          line: {color, width: year === currentYear() ? 3 : 2}, marker: {size: 4},
-          hovertemplate: `${year} %{x|%m-%d}<br>%{y:.1f} ${metricUnits[metric]}<extra></extra>`};
-      });
-      renderLegend($('ogimet-legend'), years.map(({year, label, color}) => [label || String(year), color]));
-      const location = nasa ? displayName(result.region) : '勐腊站（56969）';
-      $('ogimet-chart-title').textContent = `${location} · ${metricNames[metric]} · ${measureLabel(metric, mode)}`;
-      $('ogimet-chart-basis').textContent = nasa
-        ? `NASA POWER · UTC 日界 · 产区代表点 ${result.point.latitude}°, ${result.point.longitude}°${series.schema_version === 1 ? ' · 网站快照' : ' · 在线查询'}`
-        : 'Ogimet SYNOP 日报 · 截至北京时间 08:00 · 近期及可取得的往年秋季日值';
-      if (!nasa) $('ogimet-link').href = series.source_url;
-      const extent = traces.flatMap(trace => trace.x.filter((_, i) => trace.y[i] !== null)).sort();
-      const range = extent[0] === extent.at(-1) ? undefined : [extent[0], extent.at(-1)];
-      stationCard.hidden = false;
-      await Plotly.react(stationChart, traces, {
-        height: 355, margin: {l: 55, r: 22, t: 20, b: 42}, showlegend: false, hovermode: 'x unified',
-        paper_bgcolor: '#fff', plot_bgcolor: '#fff',
-        xaxis: {type: 'date', tickformat: '%m/%d', range},
-        yaxis: {title: {text: metricUnits[metric]}, gridcolor: '#edf0f2', rangemode: metric === 'precip' ? 'tozero' : 'normal'}
-      }, plotOptions);
-      if (version !== stationVersion || stationPanel.hidden) return;
-      const latest = latestValid(rows.get(years[0].year));
-      stationStatus.textContent = `最新有效${mode === 'daily' ? '日值' : '汇总'} ${fmtDate(latest.date)} · ${fmt(latest.value, metric, mode)}${nasa ? '' : ` · 网页数据更新 ${fmtTimestamp(series.updated_utc)}`}`;
-    } catch (error) {
-      if (version !== stationVersion || stationPanel.hidden) return;
-      stationCard.hidden = true;
-      stationStatus.textContent = `${sourceLabel} 暂不可用：${error.message}。`;
-      stationStatus.classList.add('is-error');
-    }
-  }
-  function switchClimateSource() {
-    const era5 = sourceSelect.value === 'era5';
-    const nasa = sourceSelect.value === 'nasa';
-    era5Panel.hidden = !era5;
-    era5Stamp.hidden = !era5;
-    stationPanel.hidden = era5;
-    stationCard.hidden = true;
-    for (const id of ['nasa-country-field', 'nasa-region-field', 'nasa-source-note']) $(id).hidden = !nasa;
-    $('ogimet-source-note').hidden = nasa;
-    if (!era5) void renderStation();
-    else { ++stationVersion; activateClimate(); }
-  }
-  sourceSelect.addEventListener('change', switchClimateSource);
-  stationMetric.addEventListener('change', () => void renderStation());
-  stationMode.addEventListener('change', () => void renderStation());
-  nasaCountry.addEventListener('change', () => { populateNasaRegions(); void renderStation(); });
-  nasaRegion.addEventListener('change', () => void renderStation());
-
   function chartCaptionFor(metric, mode) {
-    if (metric === 'tmin')
-      return `按当地日期取完整日的逐小时气温最低值，汇总沿用产区权重。灰带为 2006–${referenceEnd()} 年同日的 P25—P75。`;
-    return mode === 'weekly'
-      ? '完整自然周仅在周日绘点；相同月日前后 3 天内的历年完整周作分位比较，不绘周度分位带。'
-      : `灰带按 2006–${referenceEnd()} 年相同月日的有效${modeNames[mode]}值计算 P25—P75；其他年份沿用原版八色细线。`;
+    const basis = climateSource === 'era5'
+      ? metric === 'tmin' ? '取当地完整日的逐小时气温最低值，汇总沿用产区权重。' : ''
+      : sources[climateSource].note;
+    const method = mode === 'weekly'
+      ? '完整自然周在周日绘点，按相同月日前后 3 天内的历年完整周计算分位。'
+      : '同月日有至少 5 个历史年份的有效值时，绘制 P25—P75 灰带。';
+    return basis + method;
   }
   function ensureTimeGallery() {
     if (els.timeGallerySection) return;
@@ -799,15 +672,14 @@
     ensureTimeGallery();
     const version = timeGalleryVersion, metric = els.metric.value;
     const series = selectedSeries, region = selectedRegion;
-    const choices = metricModes[metric] || [['daily', '日度']];
+    const choices = modeChoices(metric, [region]);
     els.chartCard.hidden = true;
     if (els.chart.data && window.Plotly) Plotly.purge(els.chart);
     els.timeGalleryTitle.textContent = `${displayName(region)} · ${metricNames[metric]} · 全部时间口径`;
-    els.timeGallerySummary.textContent = metric === 'tmin'
-      ? `展示最近五年的日最低气温；数据至 ${fmtDate(series.coverage?.last_complete_date)}。`
-      : `同时展示 ${choices.length} 种既有口径，使用相同的汇总序列与原季节图配色；数据至 ${fmtDate(series.coverage?.last_complete_date)}。`;
-    renderSeasonLegend(metric, els.timeGalleryLegend); els.timeGallerySection.hidden = false;
-    els.percentile.textContent = '每张季节图分别标示本口径的历史同期位置；上方近 7 日卡片始终使用独立的同口径 7 日历史窗口。';
+    els.timeGallerySummary.textContent = `${sources[climateSource].label} · ${choices.length} 种时间口径 · 日值至 ${fmtDate(series.coverage?.last_complete_date)}`;
+    const legend = {years: new Set(), band: false};
+    renderSeasonLegend(metric, els.timeGalleryLegend, legend); els.timeGallerySection.hidden = false;
+    els.percentile.textContent = '各图注明对应时间口径的历史同期位置。';
     els.details.hidden = false;
     let rendered = 0;
     for (const [mode, label] of choices) {
@@ -824,6 +696,7 @@
         if (!figure || !window.Plotly) throw new Error('所选口径暂无有效数据或图表库未加载');
         await Plotly.newPlot(plot, figure.traces, figure.layout, plotOptions);
         if (version !== timeGalleryVersion || !card.isConnected) { Plotly.purge(plot); return; }
+        updateSeasonLegend(metric, els.timeGalleryLegend, legend, figure);
         reading.textContent = figure.latest
           ? `${fmtDate(figure.latest.date)}：${fmt(figure.latest.value, metric, mode)} · 历史位置 ${figure.context.label}`
           : `历史序列截至 ${fmtDate(series.coverage?.last_complete_date)}；尚无 ${currentYear()} 年此口径的完整值。`;
@@ -879,9 +752,16 @@
       countryShare !== null ? `${countryBasis} ${(countryShare * 100).toFixed(2)}%` : '',
       els.macro.value && groupShare !== null ? `本区域占比 ${(groupShare * 100).toFixed(2)}%` : ''].filter(Boolean).join(' · ');
   }
-  function renderSeasonLegend(metric, container = els.galleryLegend) {
-    const keys = [['历史 P25—P75', 'rgba(125,130,138,.26)', 'band'],
-      ...seasonYearStyles(metric).map(({year, label, color}) => [label || String(year), color])];
+  function updateSeasonLegend(metric, container, legend, figure) {
+    legend.band ||= figure.traces.some(trace => trace.fill === 'tonexty');
+    for (const {year} of figure.emphasis) legend.years.add(year);
+    renderSeasonLegend(metric, container, legend);
+  }
+  function renderSeasonLegend(metric, container, {years, band}) {
+    const keys = band ? [['历史 P25—P75', 'rgba(125,130,138,.26)', 'band']] : [];
+    for (const {year, label, color} of seasonYearStyles(metric))
+      if (years.has(year)) keys.push([label || String(year), color]);
+    container.hidden = !keys.length;
     renderLegend(container, keys);
   }
   function renderLegend(container, keys) {
@@ -892,12 +772,12 @@
       key.append(swatch, document.createTextNode(label)); container.append(key);
     }
   }
-  async function drawGalleryCard(card, region, version, metric, mode) {
+  async function drawGalleryCard(card, region, version, metric, mode, legend) {
     if (version !== galleryVersion || els.section.hidden) return;
     const plot = card.querySelector('.climate-gallery-chart'), reading = card.querySelector('.climate-gallery-reading');
-    if (!region.series_file) {
-      plot.textContent = missingSeriesText(region);
-      reading.textContent = isPendingDownload(region) ? '历史下载中 · 完成后请重新导出并刷新页面' : '点位来源待补齐 · 暂不绘制';
+    if (!region.series_file || (climateSource !== 'era5' && !region.metric_modes?.[metric]?.includes(mode))) {
+      plot.textContent = region.series_file ? '该产区在所选口径下暂无有效数据。' : missingSeriesText(region);
+      reading.textContent = isPendingDownload(region) ? '历史下载中' : '';
       plot.classList.add('is-empty'); return;
     }
     plot.textContent = '正在读取本地气候序列…';
@@ -910,6 +790,7 @@
       plot.replaceChildren();
       await Plotly.newPlot(plot, figure.traces, figure.layout, plotOptions);
       if (version !== galleryVersion || !card.isConnected) { Plotly.purge(plot); return; }
+      updateSeasonLegend(metric, els.galleryLegend, legend, figure);
       reading.textContent = figure.latest
         ? `${fmtDate(figure.latest.date)}：${fmt(figure.latest.value, metric, mode)} · 历史位置 ${figure.context.label}`
         : `历史序列截至 ${fmtDate(series.coverage?.last_complete_date)}；尚无 ${currentYear()} 年此指标完整值。`;
@@ -926,26 +807,27 @@
     clearSelection(); clearGallery();
     if (els.section.hidden) { setStatus('目录已就绪。打开“产区气候图”后加载当前区域的全部季节图。'); return; }
     const version = galleryVersion, metric = els.metric.value, mode = els.mode.value;
-    const term = els.search.value.trim().toLocaleLowerCase();
     const scopeRegions = countryEntities(els.country.value, 'region');
-    const regions = scopeRegions.filter(region => !term ||
-      `${displayName(region)} ${region.name_original || ''} ${region.id}`.toLocaleLowerCase().includes(term));
+    const regions = visibleEntities();
     const macro = macroGroups().find(group => group.id === els.macro.value);
     const available = regions.filter(region => region.series_file).length;
     const pending = regions.filter(isPendingDownload).length;
     const productionCount = regions.filter(region => productionTons(region) !== null).length;
-    els.galleryTitle.textContent = `${macro ? displayName(macro) : countryNames.get(els.country.value)} · ${metricNames[metric]} · ${measureLabel(metric, mode)}`;
+    const heading = macro ? displayName(macro) : countryNames.get(els.country.value);
+    els.galleryTitle.textContent = metric ? `${heading} · ${metricNames[metric]} · ${measureLabel(metric, mode)}` : heading;
     els.gallerySummary.textContent = `共 ${regions.length} 个候选产区，${available} 个已导出序列${pending ? `，${pending} 个已选点、历史下载待完成` : ''}。${productionCount
       ? ` ${productionCount} 个有${crop === 'palm' ? '官方' : '工作簿'}参考产量，按产量占比从高到低排列；其余列在后方。`
       : ' 尚无可比较的完整参考产量，暂按产区名称排列。'}`;
-    renderSeasonLegend(metric); els.gallerySection.hidden = false;
+    const legend = {years: new Set(), band: false};
+    renderSeasonLegend(metric, els.galleryLegend, legend); els.gallerySection.hidden = false;
+    els.galleryCaption.textContent = metric ? `${chartCaptionFor(metric, mode)}图表随滚动加载，点击产区名称查看详情。` : '';
     galleryObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
         galleryObserver.unobserve(entry.target);
         const region = regions.find(item => item.id === entry.target.dataset.regionId);
         if (!region) continue;
-        galleryQueue = galleryQueue.catch(() => {}).then(() => drawGalleryCard(entry.target, region, version, metric, mode));
+        galleryQueue = galleryQueue.catch(() => {}).then(() => drawGalleryCard(entry.target, region, version, metric, mode, legend));
       }
     }, {rootMargin: '350px 0px'}) : null;
     for (const [index, region] of regions.entries()) {
@@ -955,17 +837,21 @@
       name.textContent = `${index + 1}. ${displayName(region)}`;
       name.addEventListener('click', () => { els.region.value = region.id; void selectRegion(region.id); });
       const quality = document.createElement('span'); quality.className = 'climate-gallery-point';
-      quality.textContent = `${region.point_ids?.length ?? 0} 个格点`;
+      quality.textContent = climateSource === 'era5' ? `${region.point_ids?.length ?? 0} 个格点`
+        : sources[climateSource].station ? `${region.stations?.length ?? 0} 个参考台站`
+        : `${region.metric_members?.[metric] ?? 0}/${region.point_ids?.length ?? 0} 个采样点`;
       head.append(name, quality);
       const production = document.createElement('p'); production.className = 'climate-gallery-production';
       production.textContent = productionCaption(region, scopeRegions);
       const plot = document.createElement('div'); plot.className = 'climate-gallery-chart';
-      plot.textContent = '滚动到此处加载季节图…'; plot.setAttribute('aria-label', `${displayName(region)} ${metricNames[metric]}季节图`);
+      plot.textContent = '滚动到此处加载季节图…'; plot.setAttribute('aria-label', `${displayName(region)} ${metricNames[metric] || ''}季节图`);
       const reading = document.createElement('p'); reading.className = 'climate-gallery-reading';
-      reading.textContent = `当地日期 · ${aggregationLabel(region.aggregation)} · ${region.timezone || '按当地时区'}`;
+      reading.textContent = climateSource === 'era5'
+        ? `当地日期 · ${aggregationLabel(region.aggregation)} · ${region.timezone || '按当地时区'}`
+        : sources[climateSource].label;
       card.append(head, production, plot, reading); els.gallery.append(card);
       if (galleryObserver) galleryObserver.observe(card);
-      else galleryQueue = galleryQueue.catch(() => {}).then(() => drawGalleryCard(card, region, version, metric, mode));
+      else galleryQueue = galleryQueue.catch(() => {}).then(() => drawGalleryCard(card, region, version, metric, mode, legend));
     }
     setStatus(`已列出 ${regions.length} 个产区，图表按页面可见范围加载。`);
   }
@@ -997,6 +883,7 @@
     }
   }
   async function selectRegion(id) {
+    populateMetrics();
     if (id === '__all') { void renderGallery(); return; }
     clearGallery();
     const token = ++selectedToken;
@@ -1014,7 +901,7 @@
       els.regionHead.hidden = false;
       return;
     }
-    clearSelection(`正在读取 ${selectedRegion.name || selectedRegion.name_zh || selectedRegion.name_original} 的当地日度序列…`);
+    clearSelection(`正在读取 ${displayName(selectedRegion)} 的日度序列…`);
     els.regionHead.hidden = false;
     try {
       const series = await loadSeries(selectedRegion);
@@ -1036,47 +923,76 @@
       }
     }
   }
-  async function initClimate() {
+  async function loadClimateIndex(url) {
+    const response = await fetch(url, {cache: 'no-store'});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+  async function initClimate(selection = {}) {
     const token = ++catalogToken;
     const requestedBase = climateBase;
+    const requestedSource = climateSource;
+    const geoBase = crop === 'palm' ? new URL('palm/', base) : base;
+    const {label, note, links} = sources[requestedSource];
+    els.sourceNote.textContent = note;
+    for (const [name, url] of links || []) {
+      const link = document.createElement('a');
+      link.textContent = name; link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      els.sourceNote.append(' ', link);
+    }
     try {
-      const response = await fetch(new URL('index.json', requestedBase), {cache: 'no-store'});
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
+      const geo = loadClimateIndex(new URL('index.json', geoBase));
+      const overlay = requestedSource === 'era5' ? null
+        : loadClimateIndex(new URL('index.json', requestedBase)).catch(() => ({entities: {}, reference_years: []}));
+      const [data, extra] = await Promise.all([geo, overlay]);
       if (token !== catalogToken) return;
       if (data.schema_version !== 1 || !Array.isArray(data.regions) || !Array.isArray(data.countries))
         throw new Error('数据目录格式不符合 schema v1');
+      if (extra) {
+        const attach = entity => ({...entity, series_file: null, coverage: null, ...extra.entities?.[entity.id]});
+        data.regions = data.regions.map(attach);
+        data.groups = (data.groups || []).map(attach);
+        data.source = {dataset: label, reference_years: extra.reference_years};
+      }
       catalog = data;
       $('climate-region-count').textContent = String(data.regions.length);
       $('climate-series-count').textContent = String(data.regions.filter(region => region.series_file).length);
-      $('climate-baseline-years').textContent = (data.source?.reference_years || [2006, 2025]).join('–');
+      $('climate-baseline-years').textContent = [...new Set(data.source?.reference_years || [])].join('–') || '—';
+      $('climate-latest-label').textContent = extra ? '最新有效日' : '最新完整日';
       const dates = data.regions.map(region => region.coverage?.last_complete_date).filter(Boolean).sort();
       $('climate-latest-date').textContent = dates.length ? dates[dates.length - 1] : '—';
-      els.generated.textContent = `目录生成：${fmtTimestamp(data.generated_utc)} · 数据源 ${data.source?.dataset || 'ERA5-Land'}${crop === 'palm' ? ' · 油棕2021模型选点，覆盖三国已选产区' : ''}`;
-      populateCountries();
+      els.generated.textContent = extra
+        ? `${label} · 最新有效日 ${dates.at(-1) || '—'}`
+        : `目录生成 ${fmtTimestamp(data.generated_utc)} · ${data.source?.dataset || label}`;
+      populateCountries(selection);
     } catch (error) {
       if (token !== catalogToken) return;
       els.generated.textContent = '本地数据目录尚未就绪';
       setStatus(`无法读取 ${crop === 'palm' ? '棕榈' : '橡胶'}数据目录：${error.message}。请使用本地预览服务打开，等待气候数据导出后刷新。`, true);
     }
   }
-  els.crop.addEventListener('change', () => {
+  function changeClimateCatalog(keepScope) {
+    const selection = {metric: els.metric.value, mode: els.mode.value};
+    if (keepScope) Object.assign(selection, {country: els.country.value, scale: els.scale.value,
+      macro: els.macro.value, region: els.region.value});
+    else els.search.value = '';
     crop = els.crop.value === 'palm' ? 'palm' : 'rubber';
-    // The supplementary forecast archive uses rubber nodes and weights.
-    // Keep its existing renderer intact; it is outside the palm history scope.
+    climateSource = els.source.value;
     const rubberForecast = els.section.querySelector('.forecast-panel');
-    if (rubberForecast) rubberForecast.style.display = crop === 'palm' ? 'none' : '';
-    climateBase = crop === 'palm' ? new URL('palm/', base) : base;
+    if (rubberForecast) rubberForecast.style.display = crop === 'palm' || climateSource !== 'era5' ? 'none' : '';
+    climateBase = climateSource === 'era5' ? (crop === 'palm' ? new URL('palm/', base) : base)
+      : new URL(`climate-sources/${climateSource}/${crop}/`, base);
     ++selectedToken; ++chartVersion; ++timeGalleryVersion;
     catalog = null; selectedRegion = null; selectedSeries = null;
-    clearGallery(); clearSelection('正在读取所选品种的数据目录…');
-    els.search.value = '';
-    for (const field of [els.country, els.scale, els.macro, els.region, els.search]) field.disabled = true;
-    for (const id of ['climate-region-count', 'climate-series-count', 'climate-latest-date']) $(id).textContent = '—';
-    void initClimate();
-  });
+    clearGallery(); clearSelection('正在读取数据目录…');
+    for (const field of [els.country, els.scale, els.macro, els.region, els.search, els.metric, els.mode]) field.disabled = true;
+    for (const id of ['climate-region-count', 'climate-series-count', 'climate-latest-date', 'climate-baseline-years']) $(id).textContent = '—';
+    void initClimate(selection);
+  }
+  els.crop.addEventListener('change', () => changeClimateCatalog(false));
+  els.source.addEventListener('change', () => changeClimateCatalog(true));
   els.country.addEventListener('change', () => { els.search.value = ''; populateMacroRegions(); populateRegions(); });
-  els.scale.addEventListener('change', () => { els.search.value = ''; populateModes(); populateMacroRegions(els.macro.value); populateRegions(); });
+  els.scale.addEventListener('change', () => { els.search.value = ''; populateMacroRegions(els.macro.value); populateRegions(); });
   els.macro.addEventListener('change', () => { els.search.value = ''; populateRegions(); });
   els.search.addEventListener('input', () => populateRegions(els.region.value));
   els.region.addEventListener('change', () => void selectRegion(els.region.value));
@@ -1084,7 +1000,7 @@
   els.mode.addEventListener('change', () => void renderChart());
   function activateClimate() {
     requestAnimationFrame(() => {
-      if (sourceSelect.value !== 'era5') { void renderStation(); return; }
+      if (!catalog) return;
       if (isGallery()) { void renderGallery(); return; }
       if (!selectedSeries && els.region.value) void selectRegion(els.region.value);
       else void renderChart();

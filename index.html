@@ -528,17 +528,17 @@ html[data-initial-view="enso"][data-enso-state="error"] main.wrap>section[data-s
 <div>
 <span class="climate-eyebrow">产区历史气候</span>
 <h2>产区气候图</h2>
-<p>选择 ERA5-Land 产区历史、Ogimet 勐腊站日报或 NASA POWER 近期格点日值。</p>
+<p>按作物、国家和产区查看不同数据源的季节图。各来源独立计算。</p>
 </div>
 <div class="climate-stamp" id="climate-generated">正在读取本地数据目录…</div>
 </div>
-<div class="climate-field climate-source-field"><label for="climate-source">数据源</label><select id="climate-source"><option value="era5">ERA5-Land（产区格点）</option><option value="ogimet">Ogimet（勐腊站）</option><option value="nasa">NASA POWER（近期格点日值）</option></select></div>
+<div class="climate-field climate-source-field"><label for="climate-source">数据源</label><select id="climate-source"><option value="era5">ERA5-Land（产区格点）</option><option value="ogimet">Ogimet（台站观测）</option><option value="nasa-power">NASA POWER（日度格点）</option><option value="noaa-cpc">NOAA CPC（日度格点）</option><option value="noaa-ghcn">NOAA GHCN-D（台站观测）</option></select></div>
 <div id="climate-era5">
 <div aria-label="气候数据目录概况" class="climate-summary-strip">
 <div><span>候选产区</span><strong id="climate-region-count">—</strong></div>
 <div><span>可查看历史序列</span><strong id="climate-series-count">—</strong></div>
 <div><span>基准年份</span><strong id="climate-baseline-years">—</strong></div>
-<div><span>最新完整日</span><strong id="climate-latest-date">—</strong></div>
+<div><span id="climate-latest-label">最新完整日</span><strong id="climate-latest-date">—</strong></div>
 </div>
 <div class="climate-filter-panel">
 <div class="climate-field"><label for="climate-crop">品种选择</label><select id="climate-crop"><option value="rubber">橡胶</option><option value="palm">棕榈</option></select></div>
@@ -569,24 +569,9 @@ html[data-initial-view="enso"][data-enso-state="error"] main.wrap>section[data-s
 <div class="climate-gallery-section" hidden="" id="climate-gallery-section">
 <div class="climate-gallery-heading"><div><h3 id="climate-gallery-title">区域产区季节图</h3><p id="climate-gallery-summary"></p></div><div aria-label="季节图线条说明" class="climate-gallery-legend" id="climate-gallery-legend"></div></div>
 <div aria-live="polite" class="climate-gallery" id="climate-gallery"></div>
-<p class="climate-chart-caption">历史 P25—P75 灰带与当前分位点按 2006 年至基准末年的相同月日计算；完整自然周不绘分位带。图表随滚动加载，点击产区名称可查看单区详情。</p>
+<p class="climate-chart-caption" id="climate-gallery-caption"></p>
 </div>
-<p class="climate-footnote">ERA5-Land 是有滞后的历史再分析资料。CDS 时间序列匹配最近的 0.1°×0.1° 格点；在泰南纬度附近，格距约为南北 11.1 km、东西 10.9 km，但这不表示单个格点能可靠代表这一面积或其中的胶园。格点仅用于所在地历史诊断；等权试点也不等于整片胶园的面积或产量加权平均。图表和分位不构成当天割胶决策或天气预报。</p>
-</div>
-<div hidden="" id="climate-ogimet">
-<div class="climate-filter-panel">
-<div class="climate-field" hidden="" id="nasa-country-field"><label for="nasa-country">国家 / 地区</label><select id="nasa-country"></select></div>
-<div class="climate-field" hidden="" id="nasa-region-field"><label for="nasa-region">橡胶产区</label><select id="nasa-region"></select></div>
-<div class="climate-field"><label for="ogimet-metric">气象指标</label><select disabled="" id="ogimet-metric"></select></div>
-<div class="climate-field"><label for="ogimet-mode">时间口径</label><select disabled="" id="ogimet-mode"></select></div>
-</div>
-<p class="climate-load-status" id="ogimet-status" role="status">正在读取勐腊站日报…</p>
-<div class="climate-chart-card" hidden="" id="ogimet-chart-card">
-<div class="climate-chart-heading"><div><h3 id="ogimet-chart-title"></h3><p id="ogimet-chart-basis"></p></div><div aria-label="年度曲线" class="climate-gallery-legend" id="ogimet-legend"></div></div>
-<div aria-label="逐日气象对比图" id="ogimet-chart"></div>
-</div>
-<p class="climate-footnote" id="ogimet-source-note">勐腊站的单站观测与 ERA5-Land 格点的空间位置和统计日界不同。数据来自 <a href="https://www.ogimet.com/gsynres.phtml.en" id="ogimet-link" rel="noopener noreferrer" target="_blank">Ogimet SYNOP 每日汇总</a>。</p>
-<p class="climate-footnote" hidden="" id="nasa-source-note">NASA POWER 气象数据为 0.5° × 0.625° 格点估计，按 UTC 日汇总。每个产区查询一个代表点，优先使用权重最高的点。<a href="https://power.larc.nasa.gov/docs/services/api/temporal/daily/" rel="noopener noreferrer" target="_blank">NASA POWER 数据说明</a></p>
+<p class="climate-footnote" id="climate-source-note"></p>
 </div>
 </section>
 <section class="card climate-dashboard risk-dashboard" data-site-view="risk" hidden="" id="risk-section">
@@ -600,7 +585,7 @@ html[data-initial-view="enso"][data-enso-state="error"] main.wrap>section[data-s
 <script src="assets/20260927_171941/main-figures.f00718ba5477.js"></script>
 <script src="assets/weekly-full-history.d162b4aec431.js?v=20261019"></script>
 <script src="assets/main-runtime.adc532c3950e.js?v=20261019-first-paint"></script>
-<script src="assets/climate-dashboard.2fdc5fc988f1.js"></script>
+<script src="assets/climate-dashboard.26b612ec8c23.js"></script>
 <script src="assets/tapping-board.d0c6df3c5edf.js?v=20261005-linked-cards"></script>
 <script defer="" src="assets/official-refresh.da8621d35bfe.js?v=20261006-enso-all"></script>
 <script defer="" src="assets/forecast-dashboard.145fae3a41e8.js"></script>
