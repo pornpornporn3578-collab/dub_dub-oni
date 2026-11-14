@@ -58,6 +58,8 @@
     galleryTitle: $('climate-gallery-title'), gallerySummary: $('climate-gallery-summary'), galleryLegend: $('climate-gallery-legend')
   };
   const metricOptions = [...els.metric.options].map(({value, textContent}) => [value, textContent]);
+  const scaleOptions = [...els.scale.options].map(({value, textContent}) => [value, textContent]);
+  const sourceLabels = new Map([...els.source.options].map(({value, textContent}) => [value, textContent]));
   let catalog = null;
   let selectedRegion = null;
   let selectedSeries = null;
@@ -69,6 +71,7 @@
   let galleryQueue = Promise.resolve();
   const seriesCache = new Map();
   const seriesInflight = new Map();
+  const climateIndexes = new Map();
   const countryNames = new Map();
 
   function currentYear() {
@@ -85,30 +88,35 @@
     return climateSource === 'era5' ? choices : choices.filter(([mode]) =>
       scope.some(region => region.metric_modes?.[metric]?.includes(mode)));
   }
-  function populateModes(preferred = els.mode.value) {
-    const modes = modeChoices(els.metric.value);
+  function populateModes(preferred = els.mode.value, scope = activeScope()) {
+    const modes = modeChoices(els.metric.value, scope);
     const choices = isGroupScale() && modes.length ? [['__all_modes', '全部显示'], ...modes] : modes;
     els.mode.replaceChildren(...choices.map(([value, label]) => option(value, label)));
     els.mode.disabled = !choices.length;
     els.mode.value = choices.some(([value]) => value === preferred) ? preferred : choices[0]?.[0] || '';
   }
-  function populateMetrics(preferred = els.metric.value, preferredMode = els.mode.value) {
-    const choices = climateSource === 'era5' ? metricOptions : metricOptions.filter(([metric]) =>
-      activeScope().some(region => region.metric_modes?.[metric]?.length));
+  function populateMetrics(scope, preferred = els.metric.value, preferredMode = els.mode.value) {
+    const choices = scope.length ? metricOptions.filter(([metric]) => modeChoices(metric, scope).length) : [];
     els.metric.replaceChildren(...choices.map(([value, label]) => option(value, label)));
     els.metric.disabled = !choices.length;
     els.metric.value = choices.some(([value]) => value === preferred) ? preferred : choices[0]?.[0] || '';
-    populateModes(preferredMode);
+    populateModes(preferredMode, scope);
   }
-  function macroGroups(iso3 = els.country.value) {
-    return (catalog?.groups || []).filter(group => group.country_iso3 === iso3 && group.type === 'subnational' &&
+  function countryGroups(iso3, type) {
+    return (catalog?.groups || []).filter(group => group.country_iso3 === iso3 && group.type === type &&
       !(Array.isArray(group.region_ids) && group.region_ids.length === 0));
   }
+  function inMacroRegion(region, group) {
+    return group.region_ids?.includes(region.id) || region.macroregion_id === group.id || region.group_ids?.includes(group.id);
+  }
   function populateMacroRegions(preferred = '') {
-    const groups = macroGroups();
+    const country = els.country.value;
+    const regions = countryRegions(country).filter(hasSeries);
+    const groups = els.scale.value === 'country' ? [] : countryGroups(country, 'subnational').filter(group =>
+      els.scale.value === 'subregion' ? hasSeries(group) : regions.some(region => inMacroRegion(region, group)));
     els.macro.replaceChildren(option('', '全部区域'), ...groups.map(group => option(group.id, displayName(group))));
     if (groups.some(group => group.id === preferred)) els.macro.value = preferred;
-    els.macro.disabled = els.scale.value === 'country' || !groups.length;
+    els.macro.disabled = !groups.length;
   }
   function regionReference(region) {
     const record = crop === 'rubber' ? (tapping?.regions || []).find(item => item.id === region.id) : null;
@@ -126,18 +134,11 @@
     });
   }
   function isGallery() { return els.scale.value === 'region' && els.region.value === '__all'; }
-  function isPendingDownload(region) {
-    if (climateSource !== 'era5') return false;
-    return region.coverage?.status === 'pending_download' || region.download_status === 'pending_download' || region.aggregation === 'pending_download' ||
-      (!region.series_file && Boolean(region.point_ids?.length || region.selectedpoint_ids?.length || region.selected_point_ids?.length));
-  }
-  function missingSeriesText(region) {
-    if (climateSource !== 'era5') return sources[climateSource].station
-      ? '同国 75 公里内暂无具备可用日报的匹配台站。'
-      : '所选数据源在此产区暂无有效日值。';
-    return isPendingDownload(region)
-      ? '已选定气候格点，2006 年以来的历史下载尚未完成；并非该地区没有气象资料。下载及导出完成后刷新即可绘图。'
-      : '此产区尚未确定可用气候格点或尚未导出序列；不会用其他地区的数据代替。';
+  function hasSeries(region) { return Boolean(region.series_file); }
+  function matchesMeasure(region) {
+    if (climateSource === 'era5') return true;
+    const modes = region.metric_modes?.[els.metric.value] || [];
+    return els.mode.value === '__all_modes' ? modes.length > 0 : modes.includes(els.mode.value);
   }
 
   function setStatus(message, error = false) {
@@ -186,19 +187,17 @@
   function countryRegions(iso3) {
     return (catalog?.regions || []).filter(region => region.country_iso3 === iso3);
   }
-  function countryEntities(iso3, scale = els.scale.value) {
-    const macro = macroGroups(iso3).find(group => group.id === els.macro.value);
-    if (scale === 'region') return sortRegions(countryRegions(iso3).filter(region => !macro ||
-      macro.region_ids?.includes(region.id) || region.macroregion_id === macro.id || region.group_ids?.includes(macro.id)));
-    const type = scale === 'country' ? 'country' : 'subnational';
-    return (catalog?.groups || []).filter(group => group.country_iso3 === iso3 && group.type === type &&
-      !(Array.isArray(group.region_ids) && group.region_ids.length === 0) &&
-      (type === 'country' || !macro || group.id === macro.id));
+  function countryEntities(iso3, scale = els.scale.value, macroId = els.macro.value) {
+    const macro = macroId ? countryGroups(iso3, 'subnational').find(group => group.id === macroId) : null;
+    if (scale === 'region') return countryRegions(iso3).filter(region => !macro || inMacroRegion(region, macro));
+    if (scale === 'country') return countryGroups(iso3, 'country');
+    return macro ? [macro] : countryGroups(iso3, 'subnational');
   }
   function visibleEntities() {
     const term = els.search.value.trim().toLocaleLowerCase();
-    return countryEntities(els.country.value).filter(region => !term ||
-      [displayName(region), region.name_original, region.id].filter(Boolean).join(' ').toLocaleLowerCase().includes(term));
+    const regions = countryEntities(els.country.value).filter(region => hasSeries(region) && (!term ||
+      [displayName(region), region.name_original, region.id].filter(Boolean).join(' ').toLocaleLowerCase().includes(term)));
+    return els.scale.value === 'region' ? sortRegions(regions) : regions;
   }
   function activeScope() {
     const entities = visibleEntities();
@@ -210,8 +209,9 @@
       const iso3 = country.iso3 || country.country_iso3;
       if (!iso3) continue;
       countryNames.set(iso3, country.name || country.name_zh || iso3);
-      const regions = countryRegions(iso3);
-      els.country.append(option(iso3, `${countryNames.get(iso3)} · ${regions.length} 区`));
+      const count = countryRegions(iso3).filter(hasSeries).length;
+      if (count || countryGroups(iso3, 'country').some(hasSeries) || countryGroups(iso3, 'subnational').some(hasSeries))
+        els.country.append(option(iso3, count ? `${countryNames.get(iso3)} · ${count} 区` : countryNames.get(iso3)));
     }
     for (const entry of document.getElementById('risk-country')?.options || []) {
       const riskCountry = (tapping?.countries || []).find(item => item.country_iso3 === entry.value);
@@ -219,45 +219,48 @@
       else if (countryNames.has(entry.value)) entry.textContent = countryNames.get(entry.value);
     }
     els.country.disabled = !els.country.options.length;
-    els.scale.disabled = !els.country.options.length;
     els.search.disabled = !els.country.options.length;
-    const preferred = [...els.country.options].find(entry => entry.value === 'THA') ||
-      [...els.country.options].find(entry => countryRegions(entry.value).some(region => region.series_file));
+    const preferred = [...els.country.options].find(entry => entry.value === 'THA') || els.country.options[0];
     els.country.value = [...els.country.options].some(entry => entry.value === selection.country)
       ? selection.country : (preferred?.value || els.country.options[0]?.value || '');
-    els.scale.value = selection.scale || 'region';
+    populateScales(selection.scale || 'region');
     populateMacroRegions(selection.macro);
+    if (els.search.value && !visibleEntities().length) els.search.value = '';
     populateRegions(selection.region, selection.metric, selection.mode);
+  }
+  function populateScales(preferred = els.scale.value) {
+    const choices = scaleOptions.filter(([scale]) => countryEntities(els.country.value, scale, '').some(hasSeries));
+    els.scale.replaceChildren(...choices.map(([value, label]) => option(value, label)));
+    els.scale.disabled = !choices.length;
+    els.scale.value = choices.some(([value]) => value === preferred) ? preferred
+      : choices.find(([value]) => value === 'region')?.[0] || choices[0]?.[0] || '';
   }
   function populateRegions(preferredId = '', preferredMetric, preferredMode) {
     els.search.placeholder = els.scale.value === 'region' ? '中文名或原文名' : '搜索国别或大区样本';
     const regions = visibleEntities();
-    els.region.replaceChildren();
-    if (els.scale.value === 'region' && regions.length) els.region.append(option('__all', `全部显示 · ${regions.length} 个产区`));
-    for (const region of regions) {
-      const name = region.name || region.name_zh || region.name_original || region.id;
-      const unavailable = climateSource !== 'era5' ? '（暂无数据）' : isPendingDownload(region) ? '（下载中）' : '（待选点）';
-      const label = `${name}${region.name_original && region.name_zh && !region.name ? ` · ${region.name_original}` : ''}${region.series_file ? '' : unavailable}`;
-      els.region.append(option(region.id, label));
-    }
-    els.region.disabled = !regions.length;
-    if (els.scale.value === 'region' && regions.length && (!preferredId || preferredId === '__all')) {
-      els.region.value = '__all';
-      populateMetrics(preferredMetric, preferredMode);
-      void renderGallery();
+    const preferred = regions.find(region => region.id === preferredId) || (isGroupScale() ? regions[0] : null);
+    populateMetrics(preferred ? [preferred] : regions, preferredMetric, preferredMode);
+    populateRegionOptions(regions, preferred?.id ?? '__all');
+    if (els.region.value) {
+      void selectRegion(els.region.value);
       return;
     }
-    const preferred = regions.find(region => region.id === preferredId) || regions.find(region => region.series_file) || regions[0];
-    if (preferred) {
-      els.region.value = preferred.id;
-      populateMetrics(preferredMetric, preferredMode);
-      void selectRegion(preferred.id);
-    } else {
-      selectedRegion = null;
-      populateMetrics(preferredMetric, preferredMode);
-      clearGallery();
-      clearSelection('没有符合搜索条件的地区或样本组。');
+    ++selectedToken;
+    selectedRegion = null;
+    clearGallery();
+    clearSelection(els.country.options.length ? '没有符合筛选条件的产区。' : '所选数据源暂无此品种的可用产区。');
+  }
+  function populateRegionOptions(regions = visibleEntities(), preferredId = els.region.value) {
+    const choices = regions.filter(matchesMeasure);
+    els.region.replaceChildren();
+    if (els.scale.value === 'region' && choices.length) els.region.append(option('__all', `全部显示 · ${choices.length} 个产区`));
+    for (const region of choices) {
+      const label = region.name_original && region.name_zh && !region.name
+        ? `${displayName(region)} · ${region.name_original}` : displayName(region);
+      els.region.append(option(region.id, label));
     }
+    els.region.disabled = !els.region.options.length;
+    if ([...els.region.options].some(entry => entry.value === preferredId)) els.region.value = preferredId;
   }
   function aggregationLabel(value) {
     return ({representative_point: '代表格点诊断', weighted_diagnostic: '加权诊断',
@@ -310,24 +313,23 @@
       : `${countryNames.get(region.country_iso3) || region.country_iso3} · ${region.name_original || region.id} · ${region.admin_level || '候选产区'}`;
     els.regionType.textContent = isGroup ? '样本范围历史气候' : '产区代表格点历史气候';
     els.quality.textContent = aggregationLabel(region.aggregation);
-    els.quality.classList.toggle('is-unavailable', !region.series_file);
-    els.quality.classList.toggle('is-provisional', Boolean(region.series_file));
+    els.quality.classList.add('is-provisional');
     if (climateSource !== 'era5') {
       els.regionType.textContent = isGroup ? '样本范围历史气候' : sources[climateSource].station ? '产区参考台站' : '产区格点历史气候';
-      els.quality.textContent = region.series_file ? sources[climateSource].label : '暂无数据';
+      els.quality.textContent = sources[climateSource].label;
       const units = isGroup ? '产区' : '采样点';
       const stations = region.stations || [];
       const stationText = stations.slice(0, 5).map(info =>
         `${info.name}（${info.id}，${info.distance_km.toFixed(1)} km）`).join('、');
       const metricText = Object.entries(region.metric_members || {}).map(([metric, count]) =>
         `${metricNames[metric]} ${count}/${region.total_members}`).join(' · ');
-      els.coverage.textContent = region.series_file ? [
+      els.coverage.textContent = [
         `日期范围 ${fmtDate(cov.first_date)}—${fmtDate(cov.last_complete_date)}`,
         `至少一项指标有效 ${cov.complete_days} 天 · 区间内无有效值 ${cov.missing_days} 天`,
         `各指标参与统计的${units}数  ${metricText}`,
         stations.length ? `参考台站 ${stations.length} 个（距离为到匹配采样点）  ${stationText}${stations.length > 5 ? ' 等' : ''}` : '',
         sources[climateSource].note
-      ].filter(Boolean).join('\n') : missingSeriesText(region);
+      ].filter(Boolean).join('\n');
       return;
     }
     const pointCount = region.point_ids?.length ?? series?.point_ids?.length ?? 0;
@@ -775,11 +777,6 @@
   async function drawGalleryCard(card, region, version, metric, mode, legend) {
     if (version !== galleryVersion || els.section.hidden) return;
     const plot = card.querySelector('.climate-gallery-chart'), reading = card.querySelector('.climate-gallery-reading');
-    if (!region.series_file || (climateSource !== 'era5' && !region.metric_modes?.[metric]?.includes(mode))) {
-      plot.textContent = region.series_file ? '该产区在所选口径下暂无有效数据。' : missingSeriesText(region);
-      reading.textContent = isPendingDownload(region) ? '历史下载中' : '';
-      plot.classList.add('is-empty'); return;
-    }
     plot.textContent = '正在读取本地气候序列…';
     try {
       const series = await loadSeries(region);
@@ -808,14 +805,12 @@
     if (els.section.hidden) { setStatus('目录已就绪。打开“产区气候图”后加载当前区域的全部季节图。'); return; }
     const version = galleryVersion, metric = els.metric.value, mode = els.mode.value;
     const scopeRegions = countryEntities(els.country.value, 'region');
-    const regions = visibleEntities();
-    const macro = macroGroups().find(group => group.id === els.macro.value);
-    const available = regions.filter(region => region.series_file).length;
-    const pending = regions.filter(isPendingDownload).length;
+    const regions = visibleEntities().filter(matchesMeasure);
+    const macro = countryGroups(els.country.value, 'subnational').find(group => group.id === els.macro.value);
     const productionCount = regions.filter(region => productionTons(region) !== null).length;
     const heading = macro ? displayName(macro) : countryNames.get(els.country.value);
     els.galleryTitle.textContent = metric ? `${heading} · ${metricNames[metric]} · ${measureLabel(metric, mode)}` : heading;
-    els.gallerySummary.textContent = `共 ${regions.length} 个候选产区，${available} 个已导出序列${pending ? `，${pending} 个已选点、历史下载待完成` : ''}。${productionCount
+    els.gallerySummary.textContent = `当前口径有 ${regions.length} 个产区可出图。${productionCount
       ? ` ${productionCount} 个有${crop === 'palm' ? '官方' : '工作簿'}参考产量，按产量占比从高到低排列；其余列在后方。`
       : ' 尚无可比较的完整参考产量，暂按产区名称排列。'}`;
     const legend = {years: new Set(), band: false};
@@ -835,7 +830,7 @@
       const head = document.createElement('div'); head.className = 'climate-gallery-card-head';
       const name = document.createElement('button'); name.className = 'climate-gallery-name'; name.type = 'button';
       name.textContent = `${index + 1}. ${displayName(region)}`;
-      name.addEventListener('click', () => { els.region.value = region.id; void selectRegion(region.id); });
+      name.addEventListener('click', () => { els.region.value = region.id; changeRegion(); });
       const quality = document.createElement('span'); quality.className = 'climate-gallery-point';
       quality.textContent = climateSource === 'era5' ? `${region.point_ids?.length ?? 0} 个格点`
         : sources[climateSource].station ? `${region.stations?.length ?? 0} 个参考台站`
@@ -883,19 +878,12 @@
     }
   }
   async function selectRegion(id) {
-    populateMetrics();
     if (id === '__all') { void renderGallery(); return; }
     clearGallery();
     const token = ++selectedToken;
-    selectedRegion = countryEntities(els.country.value).find(region => region.id === id) || null;
+    selectedRegion = activeScope()[0] || null;
     if (!selectedRegion) { clearSelection('未找到所选产区。'); return; }
     showRegionMeta(selectedRegion, null);
-    if (!selectedRegion.series_file) {
-      clearSelection(`${displayName(selectedRegion)}：${missingSeriesText(selectedRegion)}`);
-      els.regionHead.hidden = false;
-      els.details.hidden = false;
-      return;
-    }
     if (els.section.hidden) {
       clearSelection('地区目录已就绪。打开“产区气候图”后读取所选序列。');
       els.regionHead.hidden = false;
@@ -923,16 +911,58 @@
       }
     }
   }
-  async function loadClimateIndex(url) {
+  async function fetchClimateIndex(url) {
     const response = await fetch(url, {cache: 'no-store'});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
   }
+  function climateDirectory(source, variety = crop) {
+    if (source === 'era5') return variety === 'palm' ? new URL('palm/', base) : base;
+    return new URL(`climate-sources/${source}/${variety}/`, base);
+  }
+  function loadClimateIndex(source, variety) {
+    const url = new URL('index.json', climateDirectory(source, variety)).href;
+    if (!climateIndexes.has(url)) {
+      const request = fetchClimateIndex(url).catch(error => { climateIndexes.delete(url); throw error; });
+      climateIndexes.set(url, request);
+    }
+    return climateIndexes.get(url);
+  }
+  function latestSeriesDate(entities) {
+    return entities.reduce((latest, entity) => {
+      const day = entity.coverage?.last_complete_date;
+      return hasSeries(entity) && day > latest ? day : latest;
+    }, '');
+  }
+  function updateSourceDates(variety) {
+    for (const entry of els.source.options) {
+      const name = sourceLabels.get(entry.value);
+      entry.textContent = name;
+      entry.removeAttribute('title');
+      const source = entry.value;
+      void loadClimateIndex(source, variety).then(index => {
+        if (variety !== crop) return;
+        const entities = source === 'era5' ? (index.regions || []) : Object.values(index.entities || {});
+        const latest = latestSeriesDate(entities);
+        if (latest) {
+          const [, month, day] = latest.split('-');
+          entry.textContent = `${name}：更新至${Number(month)}月${Number(day)}日`;
+        } else {
+          entry.textContent = `${name}：暂无有效日期`;
+        }
+        entry.title = entry.textContent;
+      }).catch(() => {
+        if (variety === crop) {
+          entry.textContent = `${name}：日期暂不可用`;
+          entry.title = entry.textContent;
+        }
+      });
+    }
+  }
   async function initClimate(selection = {}) {
     const token = ++catalogToken;
-    const requestedBase = climateBase;
     const requestedSource = climateSource;
-    const geoBase = crop === 'palm' ? new URL('palm/', base) : base;
+    const requestedCrop = crop;
     const {label, note, links} = sources[requestedSource];
     els.sourceNote.textContent = note;
     for (const [name, url] of links || []) {
@@ -941,28 +971,29 @@
       els.sourceNote.append(' ', link);
     }
     try {
-      const geo = loadClimateIndex(new URL('index.json', geoBase));
+      const geo = loadClimateIndex('era5', requestedCrop);
       const overlay = requestedSource === 'era5' ? null
-        : loadClimateIndex(new URL('index.json', requestedBase)).catch(() => ({entities: {}, reference_years: []}));
-      const [data, extra] = await Promise.all([geo, overlay]);
+        : loadClimateIndex(requestedSource, requestedCrop).catch(() => null);
+      const [geography, extra] = await Promise.all([geo, overlay]);
       if (token !== catalogToken) return;
-      if (data.schema_version !== 1 || !Array.isArray(data.regions) || !Array.isArray(data.countries))
+      if (geography.schema_version !== 1 || !Array.isArray(geography.regions) || !Array.isArray(geography.countries))
         throw new Error('数据目录格式不符合 schema v1');
-      if (extra) {
-        const attach = entity => ({...entity, series_file: null, coverage: null, ...extra.entities?.[entity.id]});
+      const data = {...geography};
+      if (requestedSource !== 'era5') {
+        const attach = entity => ({...entity, series_file: null, coverage: null, ...extra?.entities?.[entity.id]});
         data.regions = data.regions.map(attach);
         data.groups = (data.groups || []).map(attach);
-        data.source = {dataset: label, reference_years: extra.reference_years};
+        data.source = {dataset: label, reference_years: extra?.reference_years};
       }
       catalog = data;
       $('climate-region-count').textContent = String(data.regions.length);
       $('climate-series-count').textContent = String(data.regions.filter(region => region.series_file).length);
       $('climate-baseline-years').textContent = [...new Set(data.source?.reference_years || [])].join('–') || '—';
-      $('climate-latest-label').textContent = extra ? '最新有效日' : '最新完整日';
-      const dates = data.regions.map(region => region.coverage?.last_complete_date).filter(Boolean).sort();
-      $('climate-latest-date').textContent = dates.length ? dates[dates.length - 1] : '—';
-      els.generated.textContent = extra
-        ? `${label} · 最新有效日 ${dates.at(-1) || '—'}`
+      $('climate-latest-label').textContent = requestedSource === 'era5' ? '最新完整日' : '最新有效日';
+      const latest = latestSeriesDate(data.regions);
+      $('climate-latest-date').textContent = latest || '—';
+      els.generated.textContent = requestedSource !== 'era5'
+        ? `${label} · 最新有效日 ${latest || '—'}`
         : `目录生成 ${fmtTimestamp(data.generated_utc)} · ${data.source?.dataset || label}`;
       populateCountries(selection);
     } catch (error) {
@@ -976,28 +1007,40 @@
     if (keepScope) Object.assign(selection, {country: els.country.value, scale: els.scale.value,
       macro: els.macro.value, region: els.region.value});
     else els.search.value = '';
+    const previousCrop = crop;
     crop = els.crop.value === 'palm' ? 'palm' : 'rubber';
     climateSource = els.source.value;
     const rubberForecast = els.section.querySelector('.forecast-panel');
     if (rubberForecast) rubberForecast.style.display = crop === 'palm' || climateSource !== 'era5' ? 'none' : '';
-    climateBase = climateSource === 'era5' ? (crop === 'palm' ? new URL('palm/', base) : base)
-      : new URL(`climate-sources/${climateSource}/${crop}/`, base);
+    climateBase = climateDirectory(climateSource);
     ++selectedToken; ++chartVersion; ++timeGalleryVersion;
     catalog = null; selectedRegion = null; selectedSeries = null;
     clearGallery(); clearSelection('正在读取数据目录…');
     for (const field of [els.country, els.scale, els.macro, els.region, els.search, els.metric, els.mode]) field.disabled = true;
     for (const id of ['climate-region-count', 'climate-series-count', 'climate-latest-date', 'climate-baseline-years']) $(id).textContent = '—';
     void initClimate(selection);
+    if (previousCrop !== crop) updateSourceDates(crop);
+  }
+  function changeRegion() {
+    populateMetrics(activeScope());
+    populateRegionOptions();
+    void selectRegion(els.region.value);
+  }
+  function changeMeasure() {
+    const region = els.region.value;
+    populateRegionOptions();
+    if (region === els.region.value) void renderChart();
+    else void selectRegion(els.region.value);
   }
   els.crop.addEventListener('change', () => changeClimateCatalog(false));
   els.source.addEventListener('change', () => changeClimateCatalog(true));
-  els.country.addEventListener('change', () => { els.search.value = ''; populateMacroRegions(); populateRegions(); });
+  els.country.addEventListener('change', () => { els.search.value = ''; populateScales(); populateMacroRegions(); populateRegions(); });
   els.scale.addEventListener('change', () => { els.search.value = ''; populateMacroRegions(els.macro.value); populateRegions(); });
   els.macro.addEventListener('change', () => { els.search.value = ''; populateRegions(); });
   els.search.addEventListener('input', () => populateRegions(els.region.value));
-  els.region.addEventListener('change', () => void selectRegion(els.region.value));
-  els.metric.addEventListener('change', () => { populateModes(); void renderChart(); });
-  els.mode.addEventListener('change', () => void renderChart());
+  els.region.addEventListener('change', changeRegion);
+  els.metric.addEventListener('change', () => { populateModes(); changeMeasure(); });
+  els.mode.addEventListener('change', changeMeasure);
   function activateClimate() {
     requestAnimationFrame(() => {
       if (!catalog) return;
@@ -1009,6 +1052,7 @@
   document.querySelector('[data-view="climate"]')?.addEventListener('click', activateClimate);
   window.addEventListener('hashchange', () => { if (location.hash === '#climate') activateClimate(); });
   void initClimate();
+  updateSourceDates(crop);
 
   // 割胶风险导出与气候序列分开读取；没有导出文件时只显示明确的等待状态。
   const risk = {
