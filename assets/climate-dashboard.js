@@ -54,7 +54,7 @@
     signals: $('climate-signal-row'), auto: $('climate-auto-reading'), autoText: $('climate-auto-reading-text'),
     chartCard: $('climate-chart-card'), chart: $('climate-chart'),
     chartTitle: $('climate-chart-title'), chartSubtitle: $('climate-chart-subtitle'),
-    chartKey: document.querySelector('.climate-chart-key'), chartCaption: $('climate-chart-caption'),
+    chartLegend: $('climate-chart-legend'), chartCaption: $('climate-chart-caption'),
     details: $('climate-detail-grid'), percentile: $('climate-percentile-detail'),
     coverage: $('climate-coverage-detail'), gallerySection: $('climate-gallery-section'), gallery: $('climate-gallery'),
     galleryTitle: $('climate-gallery-title'), gallerySummary: $('climate-gallery-summary'), galleryLegend: $('climate-gallery-legend')
@@ -594,15 +594,22 @@
     return mode === 'yearly' ? '全年累计' : mode === 'daily' ? '日度' :
       mode === 'weekly' ? '完整自然周总量' : `${modeNames[mode]}${cumulativeMetrics.has(metric) ? '累计' : '平均'}`;
   }
-  function seasonYearStyles(metric, current = currentYear()) {
-    const recent = metric === 'tmin';
+  function seasonYearStyles(mode, current) {
+    const recent = [
+      {year: current, color: '#FF0000', width: 3, symbol: 'square', fill: '#FFF2CC', border: '#ED7D31'},
+      {year: current - 1, color: '#000000', width: 2.35, symbol: 'circle', fill: '#E7E6E6', border: '#000000'}
+    ];
+    if (mode === 'daily') {
+      return [...recent,
+        {year: current - 2, color: '#527FAD', width: 1.55},
+        {year: current - 3, color: '#896EAB', width: 1.55},
+        {year: current - 4, color: '#4B8962', width: 1.55}
+      ];
+    }
     return [
-      {year: current, label: `${current} · 今年`, color: '#FF0000', colorName: '红',
-        symbol: 'square', fill: recent ? '#FEE2E2' : '#FFF2CC', border: recent ? '#FF0000' : '#ED7D31'},
-      {year: current - 1, label: `${current - 1} · 去年`, color: '#000000', colorName: '黑', fill: '#E7E6E6', border: '#000000'},
-      {year: recent ? current - 2 : 2016, color: '#0000FF', colorName: '蓝', fill: '#DAE3F3', border: '#0000FF'},
-      {year: recent ? current - 3 : 2015, color: '#8B00FF', colorName: '紫', fill: '#E6D7FF', border: '#9900FF'},
-      ...(recent ? [{year: current - 4, color: '#008000', colorName: '绿', fill: '#DCFCE7', border: '#008000'}] : [])
+      ...recent,
+      {year: 2016, color: '#0000FF', width: 2.35, symbol: 'circle', fill: '#DAE3F3', border: '#0000FF'},
+      {year: 2015, color: '#8B00FF', width: 2.35, symbol: 'circle', fill: '#E6D7FF', border: '#9900FF'}
     ];
   }
   function figureFor(series, metric, mode) {
@@ -622,25 +629,28 @@
       traces.push({type: 'scatter', mode: 'lines', x, y: band.p25, fill: 'tonexty',
         fillcolor: 'rgba(125,130,138,.26)', line: {width: 0}, name: '历史 P25—P75', showlegend: false, hoverinfo: 'skip'});
     }
-    const emphasis = seasonYearStyles(metric, current).filter(({year}) =>
+    const emphasis = seasonYearStyles(mode, current).filter(({year}) =>
       transformed.get(year)?.some(entry => entry.value !== null));
     const highlighted = new Set(emphasis.map(style => style.year));
-    const mutedYears = metric === 'tmin' ? [] : years.filter(value => value >= 2015 && value <= current && !highlighted.has(value));
+    const daily = mode === 'daily';
+    const mutedYears = years.filter(year => year <= current && !highlighted.has(year) && (daily || year >= 2015));
     for (const year of mutedYears) {
       const entries = transformed.get(year);
       if (!entries.some(entry => entry.value !== null)) continue;
       traces.push({type: 'scatter', mode: 'lines', x: entries.map(entry => `2000-${entry.mmdd}`),
         y: entries.map(entry => entry.value), name: String(year), showlegend: false,
-        opacity: .58, line: {color: mutedPalette[((year - 2017) % mutedPalette.length + mutedPalette.length) % mutedPalette.length], width: 1.2},
+        opacity: daily ? .32 : .58,
+        line: {color: mutedPalette[((year - 2017) % mutedPalette.length + mutedPalette.length) % mutedPalette.length],
+          width: daily ? .9 : 1.2},
         hovertemplate: `${year} %{x|%m-%d}<br>%{y:.2f} ${metricUnits[metric]}<extra></extra>`});
     }
-    for (const {year, color, symbol = 'circle', fill, border} of [...emphasis].reverse()) {
+    for (const {year, color, width, symbol, fill, border} of [...emphasis].reverse()) {
       const entries = transformed.get(year);
-      traces.push({type: 'scatter', mode: 'lines+markers', x: entries.map(entry => `2000-${entry.mmdd}`),
+      const trace = {type: 'scatter', mode: symbol ? 'lines+markers' : 'lines', x: entries.map(entry => `2000-${entry.mmdd}`),
         y: entries.map(entry => entry.value), name: String(year), showlegend: false,
-        line: {color, width: year === current ? 3 : 2.35},
-        marker: {symbol, size: mode === 'weekly' ? 6 : 4.2, color: fill, line: {color: border, width: 1.25}},
-        hovertemplate: `${year} %{x|%m-%d}<br>%{y:.2f} ${metricUnits[metric]}<extra></extra>`});
+        line: {color, width}, hovertemplate: `${year} %{x|%m-%d}<br>%{y:.2f} ${metricUnits[metric]}<extra></extra>`};
+      if (symbol) trace.marker = {symbol, size: mode === 'weekly' ? 6 : 4.2, color: fill, line: {color: border, width: 1.25}};
+      traces.push(trace);
     }
     const title = `${metricNames[metric]}：${measureLabel(metric, mode)}`;
     const layout = {
@@ -675,14 +685,12 @@
     const title = document.createElement('h3'); title.id = 'climate-time-gallery-title';
     const summary = document.createElement('p'); summary.id = 'climate-time-gallery-summary';
     text.append(title, summary);
-    const legend = document.createElement('div'); legend.id = 'climate-time-gallery-legend';
-    legend.className = 'climate-gallery-legend'; legend.setAttribute('aria-label', '季节图线条说明');
-    heading.append(text, legend);
+    heading.append(text);
     const grid = document.createElement('div'); grid.id = 'climate-time-gallery';
     grid.className = 'climate-gallery climate-time-gallery'; grid.setAttribute('aria-live', 'polite');
     section.append(heading, grid); els.chartCard.after(section);
     Object.assign(els, {timeGallerySection: section, timeGallery: grid, timeGalleryTitle: title,
-      timeGallerySummary: summary, timeGalleryLegend: legend});
+      timeGallerySummary: summary});
   }
   function clearTimeGallery() {
     ++timeGalleryVersion;
@@ -700,8 +708,7 @@
     if (els.chart.data && window.Plotly) Plotly.purge(els.chart);
     els.timeGalleryTitle.textContent = `${displayName(region)} · ${metricNames[metric]} · 全部时间口径`;
     els.timeGallerySummary.textContent = `${sources[climateSource].label} · ${choices.length} 种时间口径 · 日值至 ${fmtDate(series.coverage?.last_complete_date)}`;
-    const legend = {years: new Set(), band: false};
-    renderSeasonLegend(metric, els.timeGalleryLegend, legend); els.timeGallerySection.hidden = false;
+    els.timeGallerySection.hidden = false;
     els.percentile.textContent = '各图注明对应时间口径的历史同期位置。';
     els.details.hidden = false;
     let rendered = 0;
@@ -709,17 +716,21 @@
       if (version !== timeGalleryVersion || els.section.hidden) return;
       const card = document.createElement('article'); card.className = 'climate-gallery-card climate-time-gallery-card'; card.dataset.mode = mode;
       const title = document.createElement('h4'); title.textContent = `${metricNames[metric]} · ${label}`;
+      const heading = document.createElement('div'); heading.className = 'climate-chart-heading';
+      const legend = document.createElement('div'); legend.className = 'climate-gallery-legend';
+      legend.setAttribute('aria-label', '季节图线条说明'); legend.hidden = true;
+      heading.append(title, legend);
       const plot = document.createElement('div'); plot.className = 'climate-gallery-chart';
       plot.setAttribute('aria-label', `${displayName(region)} ${metricNames[metric]} ${label}季节图`);
       const reading = document.createElement('p'); reading.className = 'climate-gallery-reading';
       const caption = document.createElement('p'); caption.className = 'climate-chart-caption'; caption.textContent = chartCaptionFor(metric, mode);
-      card.append(title, plot, reading, caption); els.timeGallery.append(card);
+      card.append(heading, plot, reading, caption); els.timeGallery.append(card);
       try {
         const figure = figureFor(series, metric, mode);
         if (!figure || !window.Plotly) throw new Error('所选口径暂无有效数据或图表库未加载');
         await Plotly.newPlot(plot, figure.traces, figure.layout, plotOptions);
         if (version !== timeGalleryVersion || !card.isConnected) { Plotly.purge(plot); return; }
-        updateSeasonLegend(metric, els.timeGalleryLegend, legend, figure);
+        updateSeasonLegend(legend, {years: new Map(), band: false}, figure);
         reading.textContent = figure.latest
           ? `${fmtDate(figure.latest.date)}：${fmt(figure.latest.value, metric, mode)} · 历史位置 ${figure.context.label}`
           : `历史序列截至 ${fmtDate(series.coverage?.last_complete_date)}；尚无 ${currentYear()} 年此口径的完整值。`;
@@ -775,15 +786,15 @@
       countryShare !== null ? `${countryBasis} ${(countryShare * 100).toFixed(2)}%` : '',
       els.macro.value && groupShare !== null ? `本区域占比 ${(groupShare * 100).toFixed(2)}%` : ''].filter(Boolean).join(' · ');
   }
-  function updateSeasonLegend(metric, container, legend, figure) {
+  function updateSeasonLegend(container, legend, figure) {
     legend.band ||= figure.traces.some(trace => trace.fill === 'tonexty');
-    for (const {year} of figure.emphasis) legend.years.add(year);
-    renderSeasonLegend(metric, container, legend);
+    for (const {year, color} of figure.emphasis) legend.years.set(year, color);
+    renderSeasonLegend(container, legend);
   }
-  function renderSeasonLegend(metric, container, {years, band}) {
+  function renderSeasonLegend(container, {years, band}) {
     const keys = band ? [['历史 P25—P75', 'rgba(125,130,138,.26)', 'band']] : [];
-    for (const {year, label, color} of seasonYearStyles(metric))
-      if (years.has(year)) keys.push([label || String(year), color]);
+    for (const [year, color] of [...years].sort(([first], [second]) => second - first))
+      keys.push([String(year), color]);
     container.hidden = !keys.length;
     renderLegend(container, keys);
   }
@@ -808,7 +819,7 @@
       plot.replaceChildren();
       await Plotly.newPlot(plot, figure.traces, figure.layout, plotOptions);
       if (version !== galleryVersion || !card.isConnected) { Plotly.purge(plot); return; }
-      updateSeasonLegend(metric, els.galleryLegend, legend, figure);
+      updateSeasonLegend(els.galleryLegend, legend, figure);
       reading.textContent = figure.latest
         ? `${fmtDate(figure.latest.date)}：${fmt(figure.latest.value, metric, mode)} · 历史位置 ${figure.context.label}`
         : `历史序列截至 ${fmtDate(series.coverage?.last_complete_date)}；尚无 ${currentYear()} 年此指标完整值。`;
@@ -834,8 +845,8 @@
     els.gallerySummary.textContent = `当前口径有 ${regions.length} 个产区可出图。${productionCount
       ? ` ${productionCount} 个有${crop === 'palm' ? '官方' : '工作簿'}参考产量，按产量占比从高到低排列；其余列在后方。`
       : ' 尚无可比较的完整参考产量，暂按产区名称排列。'}`;
-    const legend = {years: new Set(), band: false};
-    renderSeasonLegend(metric, els.galleryLegend, legend); els.gallerySection.hidden = false;
+    const legend = {years: new Map(), band: false};
+    renderSeasonLegend(els.galleryLegend, legend); els.gallerySection.hidden = false;
     els.galleryCaption.textContent = metric ? `${chartCaptionFor(metric, mode)}图表随滚动加载，点击产区名称查看详情。` : '';
     galleryObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
       for (const entry of entries) {
@@ -882,7 +893,7 @@
     if (!figure || !window.Plotly) { els.chartCard.hidden = true; setStatus('所选指标暂无有效数据或图表库未加载。', true); return; }
     els.chartTitle.textContent = figure.title;
     els.chartSubtitle.textContent = `${displayName(selectedRegion)} · 以每年相同月日对齐 · 数据至 ${fmtDate(selectedSeries.coverage?.last_complete_date)}`;
-    els.chartKey.textContent = figure.emphasis.map(({year, label, colorName}) => `${label || year} ${colorName}线`).join(' · ');
+    updateSeasonLegend(els.chartLegend, {years: new Map(), band: false}, figure);
     els.chartCaption.textContent = chartCaptionFor(metric, mode);
     els.chartCard.hidden = false;
     try {
