@@ -6,7 +6,7 @@
   panel.innerHTML = '<div class="forecast-heading"><div><span class="forecast-tag">与历史资料分开</span><h3>ECMWF 短期天气预报</h3></div><select aria-label="预报指标"><option value="rain">降水量</option><option value="t2m_c">平均气温（原生时次均值）</option><option value="soil3">土壤湿度（28–100 cm）</option><option value="VPD_kpa">VPD（原生时次均值）</option></select></div><p class="forecast-status" role="status">正在检查预报归档…</p><div class="forecast-chart"></div><div class="forecast-table-wrap"></div><p class="forecast-note"></p>';
   // Forecasts are supplementary, after every historical/detail/gallery block.
   // Do not let an all-regions gallery put the forecast above the season plots.
-  section.append(panel);
+  document.getElementById('climate-era5').append(panel);
   const status = panel.querySelector('.forecast-status'), chart = panel.querySelector('.forecast-chart');
   const selector = panel.querySelector('select'), note = panel.querySelector('.forecast-note');
   let forecast = null, catalog = null, renderToken = 0;
