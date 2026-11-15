@@ -602,8 +602,8 @@
     if (mode === 'daily') {
       return [...recent,
         {year: current - 2, color: '#4472C4', width: 1.55},
-        {year: current - 3, color: '#A15CD8', width: 1.55},
-        {year: current - 4, color: '#36B974', width: 1.55}
+        {year: current - 3, color: '#7030A0', width: 1.55},
+        {year: current - 4, color: '#70AD47', width: 1.55}
       ];
     }
     return [
